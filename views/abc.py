@@ -1,4 +1,5 @@
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -22,7 +23,45 @@ for i, (k, colr, ic) in enumerate([("A", ui.BLUE, "🥇"), ("B", ui.ORANGE, "�
 ui.kpi(c[3], "A1-Core (A แท้)", f"{(g['priority_tier'] == 'A1-Core').sum():,} SKU",
        "AX/AY ขายบ่อย ยังขายอยู่", ui.TEAL, "⭐")
 
-tab1, tab2, tab3 = st.tabs(["ภาพรวม", "Priority tier", "รายการ SKU"])
+tab0, tab1, tab2, tab3 = st.tabs(["🗺️ Treemap", "ภาพรวม", "Priority tier", "รายการ SKU"])
+
+with tab0:
+    c1, c2, c3 = st.columns([2, 2, 1])
+    size_lbl = c1.radio("ขนาดกล่องตาม", ["มูลค่าขาย (บาท)", "จำนวนขายเฉลี่ย/เดือน (หน่วย)"], horizontal=True)
+    color_lbl = c2.radio("สีตาม", ["ABC", "ABC-XYZ", "Priority tier"], horizontal=True)
+    depth = c3.select_slider("แสดงลึก", options=[2, 3], value=3, format_func=lambda d: {2: "ถึงกลุ่ม", 3: "ถึง SKU"}[d])
+    size_col = "total_value" if size_lbl.startswith("มูลค่า") else "mean_monthly_qty"
+    color_col = {"ABC": "ABC", "ABC-XYZ": "ABC_XYZ", "Priority tier": "priority_tier"}[color_lbl]
+    t = g[g[size_col].fillna(0) > 0].copy()
+    t["หมวด"] = "หมวด " + t["category"].map(lambda x: str(int(x)) if pd.notna(x) else "-")
+    t["กลุ่ม"] = "กลุ่ม " + t["sku"].str.split("-").str[0]
+    t["รหัส"] = (t["sku"] + "<br>" + t["mean_monthly_qty"].map(lambda v: f"{v:,.0f}") + " /ด. · "
+                 + t["ABC_XYZ"].astype(str))
+    t["ทั้งหมด"] = "สินค้าทั้งหมด"
+    cmap = {"A": ui.BLUE, "B": ui.ORANGE, "C": ui.PURPLE, "AX": "#0EA5E9", "AY": "#38BDF8", "AZ": "#7DD3FC",
+            "BX": "#D97706", "BY": "#F59E0B", "BZ": "#FCD34D", "CX": "#7C3AED", "CY": "#A78BFA", "CZ": "#C4B5FD",
+            "A1-Core": ui.TEAL, "A2-Volatile": ui.ORANGE, "A3-Irregular": ui.PURPLE, "A4-Fading": "#64748B",
+            "NEW": ui.RED, "นอกกลุ่ม A": "#334155", "(?)": "#18205A"}
+    fig = px.treemap(t, path=["ทั้งหมด", "หมวด", "กลุ่ม", "รหัส"], values=size_col, color=color_col,
+                     color_discrete_map=cmap, maxdepth=depth + 1,
+                     hover_data={"name": True, "mean_monthly_qty": ":,.1f", "ABC_XYZ": True})
+    unit = "บาท" if size_col == "total_value" else "หน่วย/ด."
+    fig.update_traces(
+        texttemplate="<b>%{label}</b><br>%{value:,.0f} " + unit + "<br>%{percentRoot:.1%}",
+        hovertemplate="<b>%{label}</b><br>%{value:,.0f} " + unit + "<br>%{percentRoot:.1%} ของทั้งหมด"
+                      "<br>%{percentParent:.1%} ของกลุ่มบน<extra></extra>",
+        marker=dict(line=dict(color=ui.BG, width=1.5)), root_color=ui.CARD, tiling=dict(pad=3))
+    with st.container(border=True):
+        ui.card_title("หมวดสินค้า → กลุ่มรหัส → SKU  (คลิกกล่องเพื่อเจาะลึก · คลิกแถบด้านบนเพื่อย้อนกลับ)")
+        st.plotly_chart(ui.style(fig, 640, legend=False), use_container_width=True)
+        st.caption("ในกล่อง SKU: รหัส · ยอดขายเฉลี่ยต่อเดือน (หน่วย) · กลุ่ม ABC-XYZ — กลุ่มรหัส = 3 หลักแรกของรหัสสินค้า")
+    sub = (t.groupby(["หมวด", "กลุ่ม"]).agg(SKU=("sku", "count"), มูลค่า=("total_value", "sum"),
+                                         เฉลี่ย=("mean_monthly_qty", "sum"),
+                                         A=("ABC", lambda x: (x == "A").sum())).reset_index()
+           .sort_values("มูลค่า", ascending=False))
+    with st.expander("ตารางสรุปตามกลุ่มรหัส"):
+        st.dataframe(sub, hide_index=True, use_container_width=True, column_config={
+            "มูลค่า": ui.num("มูลค่า (บาท)"), "เฉลี่ย": ui.num("Σ เฉลี่ย/ด. (หน่วย)"), "A": ui.num("SKU กลุ่ม A")})
 
 with tab1:
     c1, c2 = st.columns(2)

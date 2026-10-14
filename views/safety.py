@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
@@ -27,7 +28,64 @@ ui.kpi(c[2], "Lead time เฉลี่ย", f"{ui.fmt_num(lt.mean())} วัน
 hi = (m["ss_months"] > 2).sum()
 ui.kpi(c[3], "SS เกิน 2 เดือนขาย", f"{hi:,} SKU", "ควรรีวิว (มักเป็นกลุ่ม Z)", ui.PURPLE, "⚠️")
 
-tab1, tab2 = st.tabs(["ภาพรวม", "ตารางราย SKU"])
+tab0, tab1, tab2 = st.tabs(["🧮 คำนวณ PR", "ภาพรวม", "ตารางราย SKU"])
+
+# ============================================================ คำนวณ PR
+with tab0:
+    st.markdown("กรอก **รหัสสินค้า** และ **สต๊อกคงเหลือปัจจุบัน** (เพิ่มแถวได้ หรือวางจาก Excel) "
+                "ระบบจะเทียบกับ Safety stock / ROP แล้วแนะนำจำนวนที่ควรเปิด PR ผลิตหรือสั่งซื้อ")
+    sku_opts = model.master.sort_values("value_rank", na_position="last")["sku"].tolist()
+    if "pr_rows" not in st.session_state:
+        st.session_state["pr_rows"] = pd.DataFrame({"sku": [None] * 5, "on_hand": [0.0] * 5,
+                                                    "on_order": [0.0] * 5, "lot_size": [1.0] * 5})
+    c1, c2 = st.columns([4, 1])
+    with c2:
+        review = st.number_input("รอบทบทวน (เดือน)", min_value=0.25, max_value=6.0, value=1.0, step=0.25,
+                                 help="ความถี่ที่วางแผนสั่ง/ผลิต เช่น เดือนละครั้ง = 1")
+    with c1:
+        rows = st.data_editor(
+            st.session_state["pr_rows"], num_rows="dynamic", use_container_width=True, key="pr_editor",
+            column_config={
+                "sku": st.column_config.SelectboxColumn("รหัสสินค้า", options=sku_opts, required=False,
+                                                        help="พิมพ์ค้นหารหัสได้"),
+                "on_hand": st.column_config.NumberColumn("คงเหลือปัจจุบัน", min_value=0, step=1, format="%d"),
+                "on_order": st.column_config.NumberColumn("ค้างรับ (PR/PO เดิม)", min_value=0, step=1, format="%d"),
+                "lot_size": st.column_config.NumberColumn("ปัดทีละ (lot)", min_value=1, step=1, format="%d",
+                                                          help="ขั้นต่ำ/ขนาดล็อต เช่น ผลิตทีละ 50 ม้วน"),
+            })
+    res = dp.pr_calc(model, rows, review)
+    if len(res) and "pr_qty" in res:
+        need = res[res["pr_qty"] > 0]
+        c = st.columns(4)
+        ui.kpi(c[0], "SKU ที่ต้องเปิด PR", f"{len(need):,}", f"จาก {len(res):,} รหัสที่กรอก", ui.RED, "🧾")
+        ui.kpi(c[1], "รวมจำนวน PR", ui.fmt_num(need["pr_qty"].sum()), "หน่วย", ui.ORANGE, "📦")
+        ui.kpi(c[2], "ต่ำกว่า Safety stock", f"{res['status'].astype(str).str.contains('ต่ำกว่า').sum():,}",
+               "ต้องเร่งด่วน", ui.PURPLE, "🚨")
+        ui.kpi(c[3], "ยังไม่ต้องสั่ง", f"{(res['status'] == 'ยังไม่ต้องสั่ง').sum():,}", "สต๊อกเพียงพอ", ui.TEAL, "✅")
+        with st.container(border=True):
+            ui.card_title("ผลการคำนวณ")
+            show = res.copy()
+            show["cover_months"] = show["cover_months"].replace(np.inf, np.nan)
+            st.dataframe(show, hide_index=True, use_container_width=True, column_config={
+                **ui.SKU_COLS, "on_hand": ui.num("คงเหลือ"), "on_order": ui.num("ค้างรับ"),
+                "demand_month": ui.num("ความต้องการ/ด.", 1), "demand_basis": "ใช้ข้อมูลจาก",
+                "lead_time_days": ui.num("LT (วัน)"), "safety_stock": ui.num("SS"), "rop": ui.num("ROP"),
+                "target": ui.num("Target"), "cover_months": ui.num("พอขายกี่เดือน", 1),
+                "status": "สถานะ", "pr_qty": ui.num("➡️ เปิด PR (หน่วย)")})
+            st.download_button("⬇️ ดาวน์โหลดผล (CSV)", show.to_csv(index=False).encode("utf-8-sig"),
+                               file_name="pr_suggestion.csv", mime="text/csv")
+    else:
+        st.info("เลือกรหัสสินค้าในตารางด้านบนเพื่อเริ่มคำนวณ")
+    with st.expander("วิธีคำนวณ PR"):
+        st.markdown("""
+- **ความต้องการต่อเดือน** = ค่าเฉลี่ย Forecast ของเดือนข้างหน้าที่ครอบคลุม *Lead time + รอบทบทวน*
+  (ถ้ายังไม่มี forecast ใช้ค่าเฉลี่ยในอดีต)
+- **ROP** = ความต้องการ/ด. × Lead time ÷ 30 + Safety stock
+- **Target** = ความต้องการ/ด. × (Lead time ÷ 30 + รอบทบทวน) + Safety stock
+- ถ้า **คงเหลือ + ค้างรับ ≤ ROP** → **เปิด PR = Target − (คงเหลือ + ค้างรับ)** แล้วปัดขึ้นตาม lot
+- สินค้า A4-Fading จะไม่แนะนำให้สั่งเพิ่ม · Safety stock / Lead time ดึงจากชีต Cal ABC_XYZ
+""")
+
 with tab1:
     c1, c2 = st.columns(2)
     with c1, st.container(border=True):

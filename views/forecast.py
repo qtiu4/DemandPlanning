@@ -37,20 +37,23 @@ prev_m = [m for m in months if m < min(sel)]
 ps = dp.summarize(acc_all[acc_all["month"] == prev_m[-1]]).iloc[0] if prev_m else None
 pv = (lambda k, f=ui.fmt_pct: f" · เดือนก่อน {f(ps[k])}" if ps is not None else "")
 
-tab1, tab2, tab3, tab4 = st.tabs(["ภาพรวม", "แยกกลุ่ม", "ราย SKU", "ยังไม่มี Forecast"])
+tab1, tab5, tab2, tab3, tab4 = st.tabs(["ภาพรวม", "⚠️ เฝ้าระวังของขาด", "แยกกลุ่ม", "ราย SKU", "ยังไม่มี Forecast"])
 
 # ============================================================ ภาพรวม
 with tab1:
     ui.section("ภาพรวมเดือนที่เลือก")
-    c = st.columns(4)
+    c = st.columns(5)
     ui.kpi(c[0], "Forecast Accuracy", ui.fmt_pct(s["accuracy"]), "1 − WAPE" + pv("accuracy"), ui.BLUE, "🎯")
-    ui.kpi(c[1], "Bias", ui.fmt_pct(s["bias"], sign=True),
+    ui.kpi(c[1], "MAE", ui.fmt_num(s["mae"], 1),
+           "หน่วย/SKU/เดือน" + pv("mae", lambda v: ui.fmt_num(v, 1)) + f" · RMSE {ui.fmt_num(s['rmse'], 0)}",
+           ui.RED, "📏")
+    ui.kpi(c[2], "Bias", ui.fmt_pct(s["bias"], sign=True),
            ("พยากรณ์เกิน" if s["bias"] > 0 else "พยากรณ์ขาด") + pv("bias", lambda v: ui.fmt_pct(v, sign=True)),
            ui.ORANGE, "⚖️")
-    ui.kpi(c[2], "SKU แม่น ≥ 80%", ui.fmt_pct(s["sku_hit_rate"], 0),
+    ui.kpi(c[3], "SKU แม่น ≥ 80%", ui.fmt_pct(s["sku_hit_rate"], 0),
            f"{int(round(s['sku_hit_rate'] * s['n_sku'])):,} จาก {int(s['n_sku']):,} SKU", ui.TEAL, "✅")
-    ui.kpi(c[3], "Forecast / Actual", f"{ui.fmt_num(s['forecast'])}",
-           f"ยอดจริง {ui.fmt_num(s['actual'])} หน่วย · คลาด {ui.fmt_num(s['abs_error'])}", ui.PURPLE, "📦")
+    ui.kpi(c[4], "Forecast / Actual", f"{ui.fmt_num(s['forecast'])}",
+           f"ยอดจริง {ui.fmt_num(s['actual'])} หน่วย", ui.PURPLE, "📦")
 
     # แนวโน้มรายเดือน: ยอดจริงของ SKU ที่มี forecast + forecast
     act = model.monthly[model.monthly["sku"].isin(fc_skus)].groupby("month")["qty"].sum()
@@ -99,6 +102,41 @@ with tab1:
             fig.update_yaxes(tickformat=".0%")
             st.plotly_chart(ui.style(fig, 320), use_container_width=True)
 
+# ============================================================ เฝ้าระวังของขาด
+with tab5:
+    groups = sorted(model.master["ABC_XYZ"].dropna().unique().tolist())
+    cc1, cc2 = st.columns([3, 1])
+    focus = cc1.multiselect("กลุ่มที่เฝ้าระวัง", groups,
+                            default=[g for g in ["AX", "AY", "BX"] if g in groups], key="watch_groups")
+    thr = cc2.select_slider("เกณฑ์ต่างเกิน", options=[0.1, 0.2, 0.3, 0.5], value=0.2,
+                            format_func=lambda v: f"{v:.0%}", key="watch_thr")
+    w = dp.stockout_watch(model, tuple(focus), thr)
+    w = w[w["sku"].isin(skus)]
+    risk = w[w["risk_score"] > 0]
+    c = st.columns(4)
+    ui.kpi(c[0], "SKU ที่เฝ้าระวัง", f"{len(risk):,}", f"จาก {len(w):,} SKU ในกลุ่มที่เลือก", ui.RED, "⚠️")
+    ui.kpi(c[1], "ขายจริงเกิน FC", f"{risk['risk_flags'].str.contains('ขายจริงเกิน').sum():,}",
+           f"เดือนล่าสุดที่ประเมิน · เกิน {thr:.0%}", ui.ORANGE, "📈")
+    ui.kpi(c[2], "FC เดือนหน้าต่ำ", f"{risk['risk_flags'].str.contains('FC เดือนหน้าต่ำ').sum():,}",
+           f"{w['next_month'].iloc[0] if len(w) else '-'} ต่ำกว่าเฉลี่ย 3 ด. เกิน {thr:.0%}", ui.PURPLE, "📉")
+    ui.kpi(c[3], "ไม่มี FC เดือนหน้า", f"{risk['risk_flags'].str.contains('ไม่มี FC').sum():,}",
+           "ควรเพิ่มในชีต Forecast", ui.BLUE, "❓")
+    with st.container(border=True):
+        ui.card_title("รายการที่ควรเน้น (เรียงตามจำนวนสัญญาณเสี่ยง และส่วนต่างที่อาจขาด)")
+        cols = ["sku", "name", "ABC_XYZ", "priority_tier", "risk_score", "recent3", "act_last", "fc_last",
+                "fc_next", "gap_next", "safety_stock", "reorder_point", "risk_flags"]
+        st.dataframe(risk[cols], hide_index=True, use_container_width=True, height=460, column_config={
+            **ui.SKU_COLS, "risk_score": st.column_config.ProgressColumn("ความเสี่ยง", format="%d / 3",
+                                                                          min_value=0, max_value=3),
+            "recent3": ui.num("เฉลี่ย 3 ด. ล่าสุด"), "act_last": ui.num("ขายจริงเดือนล่าสุด"),
+            "fc_last": ui.num("FC เดือนล่าสุด"), "fc_next": ui.num("FC เดือนหน้า"),
+            "gap_next": ui.num("อาจขาด (หน่วย)", help="เฉลี่ย 3 ด. ล่าสุด − FC เดือนหน้า"),
+            "safety_stock": ui.num("SS"), "reorder_point": ui.num("ROP"), "risk_flags": "สัญญาณ"})
+        st.download_button("⬇️ ดาวน์โหลดรายการเฝ้าระวัง (CSV)", risk[cols].to_csv(index=False).encode("utf-8-sig"),
+                           file_name="stockout_watch.csv", mime="text/csv")
+    st.caption("สัญญาณเสี่ยง: (1) ขายจริงเดือนล่าสุดเกิน FC · (2) FC เดือนหน้าต่ำกว่ายอดขายเฉลี่ย 3 เดือนล่าสุด หรือไม่มี FC · "
+               "(3) ยอดขาย 3 เดือนล่าสุดสูงกว่าค่าเฉลี่ยในอดีต (ดีมานด์กำลังโต)")
+
 # ============================================================ แยกกลุ่ม
 with tab2:
     dim_map = {"หมวด": "category", "ABC": "ABC", "ABC-XYZ": "ABC_XYZ", "Priority tier": "priority_tier",
@@ -117,7 +155,8 @@ with tab2:
             dim: dim_lbl, "n_sku": ui.num("SKU"), "actual": ui.num("Actual"), "forecast": ui.num("Forecast"),
             "abs_error": ui.num("|Error|"), "wape": st.column_config.NumberColumn("WAPE", format="%.1f%%"),
             "accuracy": ui.pct_bar("Accuracy"), "bias": st.column_config.NumberColumn("Bias", format="%+.1f%%"),
-            "sku_hit_rate": st.column_config.NumberColumn("SKU แม่น≥80%", format="%.0f%%")})
+            "sku_hit_rate": st.column_config.NumberColumn("SKU แม่น≥80%", format="%.0f%%"),
+            "mae": ui.num("MAE", 1), "rmse": ui.num("RMSE", 1)})
     with c2, st.container(border=True):
         ui.card_title("Bias (+ เกิน / − ขาด)")
         b2 = bd.dropna(subset=["bias"])
@@ -191,7 +230,10 @@ with st.expander("วิธีคำนวณ"):
 | Bias | (ΣF − ΣA) ÷ ΣA → + เกิน / − ขาด |
 | SKU แม่น ≥ 80% | สัดส่วน SKU ที่ 1 − \\|F−A\\|/A ≥ 0.8 |
 | Tracking signal | ΣError ÷ MAD (ใช้ได้เมื่อมี ≥ 3 เดือน) |
+| MAE | ค่าเฉลี่ย \\|F − A\\| ต่อ SKU-เดือน (หน่วย) |
+| RMSE | √ค่าเฉลี่ย (F − A)² — ลงโทษตัวที่คลาดมากๆ หนักกว่า MAE |
 
+- **ทำไมไม่ใช้ F1 / ROC:** ใช้กับการทำนายแบบ ใช่/ไม่ใช่ (classification) ส่วน forecast ทำนายเป็นจำนวน จึงใช้ MAE / WAPE / Bias
 - **Actual** = จำนวนจ่ายจากบิล **NV / IV** เท่านั้น · เทียบเฉพาะ SKU ที่อยู่ในชีต Forecast
 - ผลรวมหน่วยรวมหลายหน่วยนับ (ม้วน/ชิ้น) — ดูแยกตาม *หมวด* เพื่อเทียบหน่วยเดียวกัน
 - ล็อกตัวเลข forecast ก่อนเริ่มเดือน — ถ้าแก้ระหว่างเดือน accuracy จะดีเกินจริง

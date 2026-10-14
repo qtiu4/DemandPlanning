@@ -22,8 +22,16 @@ TH_MONTH_FULL = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.
 CSS = f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Kanit:wght@300;400;500;600&display=swap');
-html, body, [class*="st-"], .stMarkdown, button, input, textarea, label, p, li, h1, h2, h3, h4 {{
-  font-family: 'Kanit', sans-serif !important; }}
+/* ฟอนต์ Kanit เฉพาะข้อความ — ห้ามครอบ span ทั่วไป ไม่งั้นไอคอนจะกลายเป็นตัวหนังสือ (เช่น arrow_right) */
+html, body, .stApp, p, li, label, input, textarea, button, h1, h2, h3, h4, h5, h6, td, th,
+[data-testid="stMarkdownContainer"], [data-baseweb="select"] div, [data-baseweb="tab"], [role="option"] {{
+  font-family: 'Kanit', sans-serif; }}
+[data-testid="stIconMaterial"], .material-symbols-rounded, [class*="material-symbols"] {{
+  font-family: 'Material Symbols Rounded' !important; }}
+/* dropdown / เมนูคอลัมน์ในตาราง: พื้นทึบ อยู่ชั้นบนสุด */
+[data-baseweb="popover"] {{ z-index: 10000 !important; }}
+[data-baseweb="popover"] ul, [data-baseweb="menu"], [data-testid="stDataFrameColumnMenu"] {{
+  background: {CARD} !important; border: 1px solid {BORDER}; }}
 [data-testid="stAppViewContainer"] {{ background: {BG}; }}
 [data-testid="stHeader"] {{ background: transparent; }}
 [data-testid="stSidebar"] {{ background: {BG_SIDE}; border-right: 1px solid #1B2352; }}

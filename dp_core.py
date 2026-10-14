@@ -312,6 +312,9 @@ def summarize(df: pd.DataFrame, by: str | list[str] | None = None, basis: str = 
             "accuracy": max(0.0, 1 - wape) if pd.notna(wape) else np.nan,
             "bias": (F - A) / A if A > 0 else np.nan,
             "sku_hit_rate": (g["accuracy"] >= 0.8).mean() if len(g) else np.nan,
+            # MAE / RMSE ต่อ SKU-เดือน (หน่วย)
+            "mae": g["abs_error"].mean() if len(g) else np.nan,
+            "rmse": float(np.sqrt((g["error"] ** 2).mean())) if len(g) else np.nan,
         })
 
     if by is None:
@@ -382,3 +385,110 @@ def monthly_totals(model: Model, skus: list[str] | None = None) -> pd.DataFrame:
     out.loc[past, ["qty", "value"]] = out.loc[past, ["qty", "value"]].fillna(0)
     out["label"] = out["month"].map(month_label)
     return out.sort_values("month")
+
+
+# ---------------------------------------------------------------- stockout watch
+def recent_avg(model: Model, n: int = 3) -> pd.Series:
+    """ยอดขายเฉลี่ย n เดือนล่าสุดที่ครบเดือน (เดือนที่ไม่มีขายนับเป็น 0)"""
+    end = model.last_month if model.last_month_complete else month_add(model.last_month, -1)
+    months = month_range(month_add(end, -(n - 1)), end)
+    mo = model.monthly[model.monthly["month"].isin(months)]
+    return mo.groupby("sku")["qty"].sum() / n
+
+
+def stockout_watch(model: Model, groups=("AX", "AY", "BX"), under_pct: float = 0.2) -> pd.DataFrame:
+    """SKU ที่เสี่ยงของขาดเพราะ forecast ต่ำกว่าความต้องการจริง"""
+    m = model.master[model.master["ABC_XYZ"].isin(groups)].copy()
+    m = m[m["Status"].astype(str).str.lower() != "inactive"]
+    m["recent3"] = m["sku"].map(recent_avg(model, 3)).fillna(0)
+
+    future = [mk for mk in model.fc_months if mk > model.last_month]
+    f = model.fc.set_index(["sku", "month"])["forecast_qty"]
+    nxt = future[0] if future else None
+    m["fc_next"] = [f.get((s, nxt), np.nan) for s in m["sku"]] if nxt else np.nan
+
+    acc = accuracy_frame(model)
+    last = acc["month"].max() if len(acc) else None
+    la = acc[acc["month"] == last].set_index("sku") if last else pd.DataFrame()
+    m["fc_last"] = m["sku"].map(la["forecast_qty"]) if len(la) else np.nan
+    m["act_last"] = m["sku"].map(la["actual_qty"]) if len(la) else np.nan
+
+    flags, score = [], []
+    for r in m.itertuples():
+        fl = []
+        if pd.notna(r.fc_last) and r.act_last > r.fc_last * (1 + under_pct):
+            fl.append(f"ขายจริงเกิน FC เดือนล่าสุด {r.act_last / max(r.fc_last, 1) - 1:+.0%}")
+        if pd.isna(r.fc_next):
+            fl.append("ไม่มี FC เดือนหน้า")
+        elif r.recent3 > 0 and r.fc_next < r.recent3 * (1 - under_pct):
+            fl.append(f"FC เดือนหน้าต่ำกว่าเฉลี่ย 3 ด. {r.fc_next / r.recent3 - 1:+.0%}")
+        if pd.notna(r.mean_monthly_qty) and r.mean_monthly_qty > 0 and r.recent3 > r.mean_monthly_qty * (1 + under_pct):
+            fl.append(f"ยอดขาย 3 ด. สูงกว่าค่าเฉลี่ย {r.recent3 / r.mean_monthly_qty - 1:+.0%}")
+        flags.append(" · ".join(fl))
+        score.append(len(fl))
+    m["risk_flags"], m["risk_score"] = flags, score
+    m["gap_next"] = (m["recent3"] - m["fc_next"].fillna(0)).clip(lower=0)
+    m["next_month"] = month_label(nxt) if nxt else "-"
+    return m.sort_values(["risk_score", "gap_next"], ascending=[False, False])
+
+
+# ---------------------------------------------------------------- PR calculator
+def pr_calc(model: Model, rows: pd.DataFrame, review_months: float = 1.0) -> pd.DataFrame:
+    """rows: sku, on_hand, on_order, lot_size → จำนวนที่ควรเปิด PR (หน่วย)
+
+    ความต้องการต่อเดือน (d) = ค่าเฉลี่ย forecast ของเดือนข้างหน้าที่ครอบคลุม lead time + รอบทบทวน
+                             ถ้าไม่มี forecast ใช้ค่าเฉลี่ยในอดีต (mean_monthly_qty)
+    ROP    = d × LT/30 + SS
+    Target = d × (LT/30 + รอบทบทวน) + SS
+    PR     = Target − (คงเหลือ + ค้างรับ)  เมื่อ คงเหลือ + ค้างรับ ≤ ROP  (ปัดขึ้นตาม lot)
+    """
+    m = model.master.set_index("sku")
+    future = [mk for mk in model.fc_months if mk > model.last_month]
+    f = model.fc[model.fc["month"].isin(future)].pivot_table(index="sku", columns="month",
+                                                              values="forecast_qty", aggfunc="sum")
+    out = []
+    for r in rows.itertuples():
+        sku = str(r.sku).strip() if pd.notna(r.sku) else ""
+        if not sku:
+            continue
+        if sku not in m.index:
+            out.append({"sku": sku, "status": "ไม่พบรหัสนี้"})
+            continue
+        s = m.loc[sku]
+        lt = (s.get("lead_time_days") if pd.notna(s.get("lead_time_days")) else 30) / 30
+        cover = lt + review_months
+        n = max(1, int(np.ceil(cover)))
+        if sku in f.index and f.loc[sku].notna().any():
+            vals = f.loc[sku].dropna().iloc[:n]
+            d, basis = float(vals.mean()), f"Forecast {len(vals)} ด."
+        else:
+            d, basis = float(s.get("mean_monthly_qty") or 0), "ค่าเฉลี่ยในอดีต"
+        ss = float(s.get("safety_stock") or 0) if pd.notna(s.get("safety_stock")) else 0.0
+        def _f(v, d):
+            try:
+                v = float(v)
+                return d if np.isnan(v) else v
+            except (TypeError, ValueError):
+                return d
+        oh = _f(getattr(r, "on_hand", 0), 0.0)
+        oo = _f(getattr(r, "on_order", 0), 0.0)
+        lot = max(_f(getattr(r, "lot_size", 1), 1.0), 1.0)
+        avail = oh + oo
+        rop = d * lt + ss
+        target = d * cover + ss
+        if s.get("priority_tier") == "A4-Fading":
+            status, pr = "Fading — ไม่ควรสั่งเพิ่ม", 0.0
+        elif avail < ss:
+            status, pr = "ต่ำกว่า Safety stock — เร่งด่วน", target - avail
+        elif avail <= rop:
+            status, pr = "ถึงจุดสั่ง — เปิด PR", target - avail
+        else:
+            status, pr = "ยังไม่ต้องสั่ง", 0.0
+        pr = float(np.ceil(max(pr, 0) / lot) * lot) if pr > 0 else 0.0
+        out.append({
+            "sku": sku, "name": s.get("name"), "ABC_XYZ": s.get("ABC_XYZ"), "priority_tier": s.get("priority_tier"),
+            "on_hand": oh, "on_order": oo, "demand_month": d, "demand_basis": basis,
+            "lead_time_days": lt * 30, "safety_stock": ss, "rop": np.ceil(rop), "target": np.ceil(target),
+            "cover_months": (avail / d) if d > 0 else np.inf, "status": status, "pr_qty": pr,
+        })
+    return pd.DataFrame(out)

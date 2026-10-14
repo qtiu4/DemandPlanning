@@ -15,6 +15,13 @@ import ui
 st.set_page_config(page_title="Demand Planning", page_icon="📦", layout="wide")
 ui.inject_css()
 
+# ตรวจว่าไฟล์ทุกตัวเป็นรุ่นเดียวกัน (กันกรณีอัปโหลดไฟล์ขึ้น GitHub ไม่ครบ)
+_missing = [f for f in ("stockout_watch", "pr_calc", "recent_avg") if not hasattr(dp, f)]
+if _missing:
+    st.error("ไฟล์ **dp_core.py** เป็นเวอร์ชันเก่า — อัปโหลดไฟล์ทั้งหมดจาก demand_dashboard.zip ชุดล่าสุดขึ้น GitHub "
+             "แล้วกด Manage app → ⋮ → **Reboot app**")
+    st.stop()
+
 DEFAULT_SHEET = ("https://docs.google.com/spreadsheets/d/"
                  "1guwwOA_WvXpu_pHxBM6CZAbtuEw61-x-8Vsxbxglkrg/edit?usp=sharing")
 

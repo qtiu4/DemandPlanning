@@ -32,7 +32,7 @@ tab0, tab1, tab2 = st.tabs(["🧮 คำนวณ PR", "ภาพรวม", "�
 
 # ============================================================ คำนวณ PR
 with tab0:
-    st.markdown("กรอก **รหัสสินค้า** และ **สต๊อกคงเหลือปัจจุบัน** (เพิ่มแถวได้ หรือวางจาก Excel) "
+    st.markdown("กรอก **รหัสสินค้า** และ **สต๊อกคงเหลือปัจจุบัน** (เพิ่มแถวได้) "
                 "ระบบจะเทียบกับ Safety stock / ROP แล้วแนะนำจำนวนที่ควรเปิด PR ผลิตหรือสั่งซื้อ")
     sku_opts = model.master.sort_values("value_rank", na_position="last")["sku"].tolist()
     if "pr_rows" not in st.session_state:

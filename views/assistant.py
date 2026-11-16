@@ -30,6 +30,8 @@ def _secret(name, default=None):
 
 def _err_text(e: Exception) -> str:
     s = str(e)
+    if "503" in s or "UNAVAILABLE" in s:
+        return "เซิร์ฟเวอร์ Gemini มีคนใช้เยอะ (ลองรุ่นสำรองแล้วก็ยังไม่ว่าง) — รอ 1–2 นาทีแล้วถามใหม่ · คำถาม PR / แผนผลิต / ของขาด ที่ระบุรหัสหรือกลุ่ม ใช้โหมดเร็วได้โดยไม่ต้องรอ AI"
     if "429" in s or "RESOURCE_EXHAUSTED" in s:
         return "ใช้ครบโควตาฟรีของ Gemini ในช่วงนี้แล้ว — รอสักครู่แล้วลองใหม่ หรือเปลี่ยนรุ่นเป็น Flash-Lite ใน Secrets (GEMINI_MODEL)"
     if "API key" in s or "API_KEY" in s or "401" in s or "403" in s:
@@ -39,8 +41,9 @@ def _err_text(e: Exception) -> str:
     return f"เกิดข้อผิดพลาด: {s[:300]}"
 
 
-ASSISTANT_VERSION = "1.4"
-FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]
+ASSISTANT_VERSION = "1.5"
+FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.7-flash-lite", "gemini-3.5-flash-lite",
+                   "gemini-3-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
 
 def _pick_model(client, exclude=None):
@@ -144,6 +147,36 @@ GEMINI_MODEL = "gemini-3.7-flash"   # ไม่ใส่ก็ได้
                 ))
             st.session_state["ai_model"] = use_model
 
+        def _send_with_fallback(prompt):
+            """ส่งคำถาม · รุ่นไม่มี (404) / คนใช้เยอะ (503) / โควตาเต็ม (429) → เปลี่ยนไปรุ่นถัดไปเอง"""
+            try:
+                return st.session_state["ai_chat"].send_message(prompt)
+            except Exception as e1:  # noqa: BLE001
+                msg = str(e1)
+                if "closed" in msg:
+                    _new_chat(st.session_state["ai_model"])
+                    return st.session_state["ai_chat"].send_message(prompt)
+                if not any(k in msg for k in ("404", "not found", "NOT_FOUND", "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+                    raise
+                tried = [st.session_state["ai_model"]]
+                listed = None
+                if "404" in msg or "not found" in msg.lower():
+                    listed = _pick_model(genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta")),
+                                         exclude=tried[0])
+                last = e1
+                for alt in [m for m in [listed, *FALLBACK_MODELS] if m and m not in tried]:
+                    tried.append(alt)
+                    try:
+                        _new_chat(alt)
+                        resp = st.session_state["ai_chat"].send_message(prompt)
+                        st.session_state.setdefault("ai_model_ok", {})[mkey] = alt
+                        return resp
+                    except Exception as e2:  # noqa: BLE001
+                        last = e2
+                        if not any(k in str(e2) for k in ("404", "not found", "NOT_FOUND", "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+                            raise
+                raise RuntimeError(f"ลองแล้ว {', '.join(tried)} — {last}")
+
         if st.session_state.get("ai_sig") != sig:
             _new_chat(st.session_state.get("ai_model_ok", {}).get(mkey) or model_name)
             st.session_state["ai_sig"] = sig
@@ -152,6 +185,8 @@ GEMINI_MODEL = "gemini-3.7-flash"   # ไม่ใส่ก็ได้
         n_stock = sum(v[0] is not None for v in STOCK.values())
         c1.caption(f"ผู้ช่วย v{ASSISTANT_VERSION} · รุ่นโมเดล: `{st.session_state.get('ai_model', model_name)}` · สต๊อกที่กรอกไว้: {n_stock:,} SKU (กรอกในแท็บแผนผลิต) · ส่งให้ AI เฉพาะตัวเลขสรุปของ SKU ที่ถาม (ไม่มีรายบิล/ลูกค้า/ราคาทุน) · "
                    "แพ็กเกจฟรีของ Gemini: Google อาจนำคำถาม-คำตอบไปใช้พัฒนาบริการ")
+        c2.toggle("⚡ โหมดเร็ว", value=True, key="ai_fast",
+                  help="คำถามมาตรฐาน (PR ที่มีรหัส, แผนผลิต, ของขาด) คำนวณตอบทันทีโดยไม่ต้องรอ Gemini · คำถามอื่นส่งให้ AI")
         if c2.button("🗑️ ล้างแชท", use_container_width=True):
             for k in ("ai_msgs", "ai_sig", "ai_chat", "ai_client"):
                 st.session_state.pop(k, None)
@@ -187,44 +222,29 @@ GEMINI_MODEL = "gemini-3.7-flash"   # ไม่ใส่ก็ได้
                 st.session_state["ai_calls"] = []
                 meta = ""
                 t0 = time.perf_counter()
-                with st.spinner("กำลังคำนวณ…"):
+                quick = None
+                if st.session_state.get("ai_fast", True):
                     try:
+                        quick = ai_tools.quick_answer(prompt, model, st.session_state["ai_sink"], STOCK)
+                    except Exception:  # noqa: BLE001  ถ้าโหมดเร็วพัง ส่งให้ Gemini แทน
+                        quick = None
+                if quick:
+                    text = quick
+                    meta = f"⚡ โหมดเร็ว (คำนวณตรงจากสูตร ไม่ใช้ AI) · {time.perf_counter() - t0:.2f} วินาที"
+                else:
+                    with st.spinner("กำลังถาม Gemini…"):
                         try:
-                            resp = st.session_state["ai_chat"].send_message(prompt)
-                        except Exception as e1:  # noqa: BLE001
-                            # ชื่อรุ่นใช้ไม่ได้ / client ถูกปิด → หารุ่นที่ key นี้ใช้ได้ แล้วลองใหม่ 1 ครั้ง
-                            if not ("404" in str(e1) or "not found" in str(e1).lower() or "closed" in str(e1)):
-                                raise
-                            if "closed" in str(e1):
-                                _new_chat(st.session_state["ai_model"])
-                                resp = st.session_state["ai_chat"].send_message(prompt)
-                            else:
-                                tried = [st.session_state["ai_model"]]
-                                listed = _pick_model(genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta")), exclude=tried[0])
-                                resp, last = None, e1
-                                for alt in [m for m in [listed, *FALLBACK_MODELS] if m and m not in tried]:
-                                    tried.append(alt)
-                                    try:
-                                        _new_chat(alt)
-                                        resp = st.session_state["ai_chat"].send_message(prompt)
-                                        st.session_state.setdefault("ai_model_ok", {})[mkey] = alt
-                                        break
-                                    except Exception as e2:  # noqa: BLE001
-                                        last = e2
-                                        if not ("404" in str(e2) or "not found" in str(e2).lower()):
-                                            raise
-                                if resp is None:
-                                    raise RuntimeError(f"404 ลองแล้วทุกรุ่น: {', '.join(tried)} — {last}")
-                        text = resp.text or "(ไม่มีคำตอบ)"
-                        calls = st.session_state.get("ai_calls", [])
-                        tt = time.perf_counter() - t0
-                        meta = (f"⏱️ {tt:.1f} วินาที · {st.session_state.get('ai_model')} · "
-                                 f"เครื่องมือ: {', '.join(n for n, _ in calls) or '-'} "
-                                 f"(คำนวณ {sum(d for _, d in calls):.2f} วิ ที่เหลือคือรอ Gemini)")
-                    except Exception as e:  # noqa: BLE001
-                        text = "⚠️ " + _err_text(e)
-                        if "closed" in str(e):          # สร้าง client ใหม่ในรอบถัดไป
-                            st.session_state.pop("ai_sig", None)
+                            resp = _send_with_fallback(prompt)
+                            text = resp.text or "(ไม่มีคำตอบ)"
+                            calls = st.session_state.get("ai_calls", [])
+                            tt = time.perf_counter() - t0
+                            meta = (f"⏱️ {tt:.1f} วินาที · {st.session_state.get('ai_model')} · "
+                                    f"เครื่องมือ: {', '.join(n for n, _ in calls) or '-'} "
+                                    f"(คำนวณ {sum(d for _, d in calls):.2f} วิ ที่เหลือคือรอ Gemini)")
+                        except Exception as e:  # noqa: BLE001
+                            text = "⚠️ " + _err_text(e)
+                            if "closed" in str(e):          # สร้าง client ใหม่ในรอบถัดไป
+                                st.session_state.pop("ai_sig", None)
                 tables = st.session_state["ai_sink"][n0:]
                 st.markdown(text)
                 if meta:

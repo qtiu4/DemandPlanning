@@ -35,7 +35,8 @@ def parse_month(text: str, model: dp.Model) -> int:
         yy = re.search(r"(\d{4}|\d{2})", t)
         if yy:
             y = int(yy.group(1))
-            y = y + 2500 if y < 100 else y
+            if y < 100:           # 26 → 2026 (ค.ศ.) · 69 → 2569 (พ.ศ.)
+                y = y + 2500 if y >= 60 else y + 2000
         else:      # ไม่ระบุปี → เดือนนั้นที่อยู่ถัดจากข้อมูลล่าสุด
             base = model.last_month
             y = base // 100 + (1 if mo <= base % 100 else 0)
@@ -191,3 +192,82 @@ def system_prompt(model: dp.Model) -> str:
 
 บริบท: ข้อมูลยอดขาย (บิล NV/IV) ถึง {model.last_date:%d/%m/%Y} · เดือนที่วางแผนถัดไป = {dp.month_label(nxt)} ·
 มี forecast เดือน {', '.join(dp.month_label(x) for x in model.fc_months)}"""
+
+
+# ---------------------------------------------------------------- โหมดเร็ว (ไม่ใช้ AI)
+_SKU_RE = re.compile(r"\b\d{3}-[A-Za-z0-9][A-Za-z0-9\-]*")
+_NUM = r"([\d,]+(?:\.\d+)?)"
+
+
+def _f(v, d=0):
+    return "-" if v is None or (isinstance(v, float) and not np.isfinite(v)) else f"{v:,.{d}f}"
+
+
+def quick_answer(text: str, model: dp.Model, sink: list, stock: dict | None = None):
+    """ตอบคำถามมาตรฐาน 3 แบบทันทีด้วยสูตร (ไม่ต้องรอ Gemini) — ถ้าไม่เข้าแบบไหนคืน None"""
+    t = str(text or "")
+    tools = {f.__name__: f for f in make_tools(model, sink, stock)}
+    known = set(model.master["sku"])
+    skus = [s for s in dict.fromkeys(x.upper() for x in _SKU_RE.findall(t)) if s in known]
+    groups = list(dict.fromkeys(g.upper() for g in re.findall(r"(?<![A-Za-z])([ABCabc][XYZNxyzn])(?![A-Za-z])", t)))
+
+    def grab(pat):
+        m = re.search(pat + r"\s*" + _NUM, t, re.I)
+        return float(m.group(1).replace(",", "")) if m else None
+
+    # 1) PR — มีรหัส 1 ตัว + คำถามเรื่องเปิด PR/สั่ง/ผลิตเพิ่ม/คงเหลือ
+    if len(skus) == 1 and re.search(r"PR|เปิด|สั่ง|ผลิตเพิ่ม|เหลือ|สต๊อก|สต็อก|คงคลัง", t, re.I) and "แผน" not in t:
+        oh = grab(r"(?:คงเหลือ|เหลือ|สต๊อก|สต็อก|มีอยู่|on.?hand)")
+        oo = grab(r"(?:ค้างรับ|ค้างส่ง|on.?order)")
+        lot = grab(r"(?:lot|ล็อต|ลอต)")
+        r = tools["pr_suggestion"](skus[0], -1.0 if oh is None else oh, -1.0 if oo is None else oo, lot or 1.0)
+        if r.get("need_on_hand"):
+            return (f"**{skus[0]}** — บอกสต๊อกคงเหลือปัจจุบันด้วยนะคะ เช่น \"{skus[0]} เหลือ 300\" "
+                    "(หรือกรอกไว้ในแท็บ 📅 แผนผลิต → 📦 สต๊อกคงเหลือ)")
+        if "error" in r:
+            return r["error"]
+        go = (r.get("pr_qty") or 0) > 0
+        return (f"**{r['sku']}** {r.get('name') or ''} ({r.get('ABC_XYZ')})\n\n"
+                f"{'✅ **ควรเปิด PR ' + _f(r['pr_qty']) + ' หน่วย**' if go else '⏸️ **ยังไม่ต้องเปิด PR**'} — {r.get('status')}\n\n"
+                f"- คงเหลือ {_f(r.get('on_hand'))} + ค้างรับ {_f(r.get('on_order'))} ({r.get('stock_source')}) "
+                f"→ พอใช้ประมาณ {_f(r.get('cover_months'), 1)} เดือน\n"
+                f"- ความต้องการ ~{_f(r.get('demand_month'))}/เดือน (จาก {r.get('demand_basis')}) · Lead time {_f(r.get('lead_time_days'))} วัน\n"
+                f"- Safety stock {_f(r.get('safety_stock'))} · ROP {_f(r.get('rop'))} · Target {_f(r.get('target'))}\n"
+                f"- PR = Target − (คงเหลือ + ค้างรับ) เมื่อของถึงจุดสั่ง (≤ ROP)")
+
+    # 2) แผนผลิต
+    if "แผน" in t:
+        mtxt = ""
+        if m := re.search(r"(\d{4}-\d{1,2}|\d{1,2}/\d{4})", t):
+            mtxt = m.group(1)
+        else:
+            for k in sorted(TH_MONTH_ALIASES, key=len, reverse=True):
+                if k in t:
+                    yy = re.search(re.escape(k) + r"\S*\s*(\d{4}|\d{2})\b", t)
+                    mtxt = k + (" " + yy.group(1) if yy else "")
+                    break
+        st_txt = "; ".join(f"{k}={v}" for k, v in re.findall(r"(\d{3}-[A-Za-z0-9\-]+)\s*(?:เหลือ|คงเหลือ)\s*" + _NUM, t))
+        r = tools["production_plan"](month=mtxt, skus=",".join(skus) if skus and not st_txt else "",
+                                     abc_xyz=",".join(groups), stock_text=st_txt)
+        if "error" in r:
+            return f"แผน {r['month']}: {r['error']}"
+        wk = "\n".join(f"| {k} | {v:,} |" for k, v in r["weekly_total"].items())
+        ded = r.get("n_sku_stock_deducted", 0)
+        top = "\n".join(f"| {i['sku']} | {i.get('ABC_XYZ') or ''} | {_f(i['plan_qty'])} |" for i in r["items"][:10])
+        return (f"**แผนผลิต {r['month']}**{' กลุ่ม ' + ', '.join(groups) if groups else ''} — "
+                f"{r['n_sku']:,} SKU รวม **{_f(r['total_plan_qty'])} หน่วย**\n\n"
+                f"| สัปดาห์ | จำนวน |\n|---|---:|\n{wk}\n\n"
+                f"แบ่งรายสัปดาห์ตามสัดส่วนยอดขาย 12 เดือนล่าสุดของแต่ละ SKU (ประวัติน้อย → ใช้ของหมวด) · "
+                + (f"หักสต๊อกคงเหลือแล้ว {ded:,} SKU ที่เหลือยังไม่หัก" if ded else
+                   "ยังไม่หักสต๊อกคงเหลือ (กรอกได้ในแท็บ 📅 แผนผลิต)")
+                + f"\n\n**10 อันดับแรก**\n\n| รหัส | กลุ่ม | แผนผลิต |\n|---|---|---:|\n{top}")
+
+    # 3) เสี่ยงของขาด
+    if re.search(r"เสี่ยง|ของขาด|ขาดสต๊อก|ขาดสต็อก|stockout", t, re.I):
+        r = tools["stockout_watch"](",".join(groups) or "AX,AY,BX")
+        rows = "\n".join(f"| {i['sku']} | {i.get('ABC_XYZ')} | {_f(i.get('recent3'))} | {_f(i.get('fc_next'))} | {i.get('risk_flags') or ''} |"
+                         for i in r["items"][:10])
+        return (f"**เฝ้าระวังของขาด ({', '.join(groups) or 'AX, AY, BX'})** — เสี่ยง **{r['at_risk']}** จาก {r['checked']} SKU "
+                f"(เทียบ forecast {r['next_month']})\n\n"
+                f"| รหัส | กลุ่ม | ขายเฉลี่ย 3 ด. | FC เดือนหน้า | สาเหตุ |\n|---|---|---:|---:|---|\n{rows}")
+    return None

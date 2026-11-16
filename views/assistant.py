@@ -1,5 +1,7 @@
+import functools
 import hashlib
 import os
+import time
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -37,6 +39,58 @@ def _err_text(e: Exception) -> str:
     return f"เกิดข้อผิดพลาด: {s[:300]}"
 
 
+ASSISTANT_VERSION = "1.4"
+FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3-flash", "gemini-2.5-flash"]
+
+
+def _pick_model(client, exclude=None):
+    """หารุ่น Gemini Flash ที่ key นี้เรียกได้ (generateContent) — เลือกรุ่นใหม่สุดที่ไม่ใช่ preview/lite"""
+    import re
+    try:
+        names = []
+        for m in client.models.list():
+            acts = getattr(m, "supported_actions", None) or []
+            name = (m.name or "").replace("models/", "")
+            if "generateContent" in acts and name != exclude:
+                names.append(name)
+    except Exception:  # noqa: BLE001
+        return None
+    bad = ("image", "tts", "audio", "live", "embedding", "vision", "thinking", "exp", "computer", "robotics")
+    cands = [n for n in names if "flash" in n and n.startswith("gemini") and not any(b in n for b in bad)]
+    if not cands:
+        return None
+
+    def rank(n):
+        v = re.search(r"gemini-(\d+(?:\.\d+)?)", n)
+        return ("preview" not in n, "lite" not in n, float(v.group(1)) if v else 0, n.endswith("latest"))
+    return max(cands, key=rank)
+
+
+def _timed(fn):
+    """บันทึกว่า AI เรียกเครื่องมือไหน ใช้เวลาเท่าไร (ไว้แสดงใต้คำตอบ)"""
+    @functools.wraps(fn)
+    def wrap(*a, **k):
+        t = time.perf_counter()
+        try:
+            return fn(*a, **k)
+        finally:
+            st.session_state.setdefault("ai_calls", []).append((fn.__name__, time.perf_counter() - t))
+    return wrap
+
+
+def _thinking(model_name):
+    """ลดการ 'คิด' ของโมเดล — งานนี้ตัวเลขมาจากเครื่องมือ ไม่ต้องคิดลึก ตอบเร็วขึ้นมาก"""
+    try:
+        from google.genai import types
+        if "gemini-3" in model_name:
+            return {"thinking_config": types.ThinkingConfig(thinking_level="low")}
+        if "gemini-2.5-flash" in model_name:
+            return {"thinking_config": types.ThinkingConfig(thinking_budget=0)}
+    except Exception:  # noqa: BLE001  (SDK รุ่นเก่าไม่มีพารามิเตอร์นี้)
+        pass
+    return {}
+
+
 def _show_tables(tables, key_prefix):
     for i, (title, df) in enumerate(tables):
         with st.expander(f"📋 {title} ({len(df):,} แถว)", expanded=len(tables) == 1 and len(df) <= 15):
@@ -48,7 +102,7 @@ def _show_tables(tables, key_prefix):
 # ============================================================ ถาม AI
 with tab_ai:
     api_key = _secret("GEMINI_API_KEY")
-    model_name = _secret("GEMINI_MODEL", "gemini-flash-latest")
+    model_name = _secret("GEMINI_MODEL", FALLBACK_MODELS[0])
     if not api_key:
         with st.container(border=True):
             ui.card_title("🔑 ตั้งค่า Gemini API key ก่อนใช้งาน")
@@ -57,7 +111,7 @@ with tab_ai:
 2. Streamlit Cloud: *Manage app → Settings → Secrets* ใส่
 ```toml
 GEMINI_API_KEY = "ใส่ key ที่ได้"
-GEMINI_MODEL = "gemini-flash-latest"   # ไม่ใส่ก็ได้
+GEMINI_MODEL = "gemini-3.7-flash"   # ไม่ใส่ก็ได้
 ```
 3. บันทึก แล้วรีเฟรชหน้านี้
 """)
@@ -74,23 +128,29 @@ GEMINI_MODEL = "gemini-flash-latest"   # ไม่ใส่ก็ได้
         st.session_state.setdefault("ai_sink", [])
         loaded = st.session_state["ctx"]["loaded_at"]
         sig = hashlib.sha1(f"{api_key}|{model_name}|{loaded}".encode()).hexdigest()
-        if st.session_state.get("ai_sig") != sig:
-            sink = st.session_state["ai_sink"]
-            client = genai.Client(api_key=api_key)
+        mkey = hashlib.sha1(f"{api_key}|{model_name}".encode()).hexdigest()   # จำรุ่นที่ใช้ได้ ข้ามการรีเฟรชข้อมูล
+
+        def _new_chat(use_model):
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta"))
             st.session_state["ai_client"] = client   # ต้องเก็บไว้ ไม่งั้น client ถูกปิดตอนรันรอบถัดไป
             st.session_state["ai_chat"] = client.chats.create(
-                model=model_name,
+                model=use_model,
                 config=types.GenerateContentConfig(
                     system_instruction=ai_tools.system_prompt(model),
-                    tools=ai_tools.make_tools(model, sink, STOCK),
+                    tools=[_timed(f) for f in ai_tools.make_tools(model, st.session_state["ai_sink"], STOCK)],
                     temperature=0.2,
+                    **_thinking(use_model),
                     automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=8),
                 ))
+            st.session_state["ai_model"] = use_model
+
+        if st.session_state.get("ai_sig") != sig:
+            _new_chat(st.session_state.get("ai_model_ok", {}).get(mkey) or model_name)
             st.session_state["ai_sig"] = sig
 
         c1, c2 = st.columns([5, 1])
         n_stock = sum(v[0] is not None for v in STOCK.values())
-        c1.caption(f"รุ่นโมเดล: `{model_name}` · สต๊อกที่กรอกไว้: {n_stock:,} SKU (กรอกในแท็บแผนผลิต) · ส่งให้ AI เฉพาะตัวเลขสรุปของ SKU ที่ถาม (ไม่มีรายบิล/ลูกค้า/ราคาทุน) · "
+        c1.caption(f"ผู้ช่วย v{ASSISTANT_VERSION} · รุ่นโมเดล: `{st.session_state.get('ai_model', model_name)}` · สต๊อกที่กรอกไว้: {n_stock:,} SKU (กรอกในแท็บแผนผลิต) · ส่งให้ AI เฉพาะตัวเลขสรุปของ SKU ที่ถาม (ไม่มีรายบิล/ลูกค้า/ราคาทุน) · "
                    "แพ็กเกจฟรีของ Gemini: Google อาจนำคำถาม-คำตอบไปใช้พัฒนาบริการ")
         if c2.button("🗑️ ล้างแชท", use_container_width=True):
             for k in ("ai_msgs", "ai_sig", "ai_chat", "ai_client"):
@@ -112,6 +172,8 @@ GEMINI_MODEL = "gemini-flash-latest"   # ไม่ใส่ก็ได้
         for i, msg in enumerate(st.session_state["ai_msgs"]):
             with st.chat_message(msg["role"], avatar="🧑‍💼" if msg["role"] == "user" else "🤖"):
                 st.markdown(msg["text"])
+                if msg.get("meta"):
+                    st.caption(msg["meta"])
                 if msg.get("tables"):
                     _show_tables(msg["tables"], f"hist{i}")
 
@@ -122,18 +184,53 @@ GEMINI_MODEL = "gemini-flash-latest"   # ไม่ใส่ก็ได้
                 st.markdown(prompt)
             with st.chat_message("assistant", avatar="🤖"):
                 n0 = len(st.session_state["ai_sink"])
+                st.session_state["ai_calls"] = []
+                meta = ""
+                t0 = time.perf_counter()
                 with st.spinner("กำลังคำนวณ…"):
                     try:
-                        resp = st.session_state["ai_chat"].send_message(prompt)
+                        try:
+                            resp = st.session_state["ai_chat"].send_message(prompt)
+                        except Exception as e1:  # noqa: BLE001
+                            # ชื่อรุ่นใช้ไม่ได้ / client ถูกปิด → หารุ่นที่ key นี้ใช้ได้ แล้วลองใหม่ 1 ครั้ง
+                            if not ("404" in str(e1) or "not found" in str(e1).lower() or "closed" in str(e1)):
+                                raise
+                            if "closed" in str(e1):
+                                _new_chat(st.session_state["ai_model"])
+                                resp = st.session_state["ai_chat"].send_message(prompt)
+                            else:
+                                tried = [st.session_state["ai_model"]]
+                                listed = _pick_model(genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta")), exclude=tried[0])
+                                resp, last = None, e1
+                                for alt in [m for m in [listed, *FALLBACK_MODELS] if m and m not in tried]:
+                                    tried.append(alt)
+                                    try:
+                                        _new_chat(alt)
+                                        resp = st.session_state["ai_chat"].send_message(prompt)
+                                        st.session_state.setdefault("ai_model_ok", {})[mkey] = alt
+                                        break
+                                    except Exception as e2:  # noqa: BLE001
+                                        last = e2
+                                        if not ("404" in str(e2) or "not found" in str(e2).lower()):
+                                            raise
+                                if resp is None:
+                                    raise RuntimeError(f"404 ลองแล้วทุกรุ่น: {', '.join(tried)} — {last}")
                         text = resp.text or "(ไม่มีคำตอบ)"
+                        calls = st.session_state.get("ai_calls", [])
+                        tt = time.perf_counter() - t0
+                        meta = (f"⏱️ {tt:.1f} วินาที · {st.session_state.get('ai_model')} · "
+                                 f"เครื่องมือ: {', '.join(n for n, _ in calls) or '-'} "
+                                 f"(คำนวณ {sum(d for _, d in calls):.2f} วิ ที่เหลือคือรอ Gemini)")
                     except Exception as e:  # noqa: BLE001
                         text = "⚠️ " + _err_text(e)
                         if "closed" in str(e):          # สร้าง client ใหม่ในรอบถัดไป
                             st.session_state.pop("ai_sig", None)
                 tables = st.session_state["ai_sink"][n0:]
                 st.markdown(text)
+                if meta:
+                    st.caption(meta)
                 _show_tables(tables, f"new{len(st.session_state['ai_msgs'])}")
-            st.session_state["ai_msgs"].append({"role": "assistant", "text": text, "tables": tables})
+            st.session_state["ai_msgs"].append({"role": "assistant", "text": text, "tables": tables, "meta": meta})
 
 # ============================================================ แผนผลิต (ไม่ใช้ AI)
 with tab_plan:

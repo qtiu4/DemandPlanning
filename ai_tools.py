@@ -4,7 +4,6 @@ ai_tools.py — เครื่องมือที่ผู้ช่วย AI 
 หลักการ: AI ไม่คำนวณตัวเลขเอง ทุกตัวเลขมาจากฟังก์ชันใน dp_core
 ข้อมูลที่ส่งกลับให้ AI เป็นผลสรุปของ SKU ที่ถามเท่านั้น (ไม่มีรายบิล / ลูกค้า / ราคาทุน)
 """
-from __future__ import annotations
 
 import re
 
@@ -63,7 +62,9 @@ def _records(df: pd.DataFrame, cols: list[str], n: int) -> list[dict]:
     return out.replace({np.nan: None}).to_dict("records")
 
 
-def make_tools(model: dp.Model, sink: list):
+def make_tools(model: dp.Model, sink: list, stock: dict | None = None):
+    """stock: {sku: (on_hand, on_order)} ที่ผู้ใช้กรอกในแท็บแผนผลิต — ใช้ dict เดิมเสมอเพื่อให้เห็นค่าล่าสุด"""
+    stock = stock if stock is not None else {}
     """สร้างฟังก์ชันเครื่องมือ (ผูกกับข้อมูลชุดปัจจุบัน) — sink เก็บตารางเต็มไว้แสดงใต้คำตอบ"""
     m = model.master.drop_duplicates("sku").set_index("sku")
 
@@ -97,31 +98,48 @@ def make_tools(model: dp.Model, sink: list):
             "forecast_next": {dp.month_label(r.month): float(r.forecast_qty) for r in fc.itertuples()},
         }
 
-    def pr_suggestion(sku: str, on_hand: float, on_order: float = 0.0, lot_size: float = 1.0,
+    def pr_suggestion(sku: str, on_hand: float = -1.0, on_order: float = -1.0, lot_size: float = 1.0,
                       review_months: float = 1.0) -> dict:
         """คำนวณว่าควรเปิด PR (ผลิต/สั่งซื้อ) หรือไม่ และจำนวนเท่าไร สำหรับ SKU หนึ่งตัว
-        ต้องมีสต๊อกคงเหลือปัจจุบัน (on_hand) — ถ้าผู้ใช้ไม่บอก ให้ถามก่อน
-        on_order = ของที่สั่ง/ผลิตค้างรับอยู่, lot_size = ปัดขึ้นทีละกี่หน่วย, review_months = รอบวางแผน (เดือน)"""
+        on_hand = สต๊อกคงเหลือปัจจุบัน ถ้าผู้ใช้ไม่บอกให้ส่ง -1 ระบบจะใช้ค่าจากตารางสต๊อกที่กรอกไว้ (ถ้ามี)
+        ถ้าตอบกลับว่า need_on_hand ให้ถามผู้ใช้
+        on_order = ของที่สั่ง/ผลิตค้างรับอยู่ (-1 = ใช้จากตาราง หรือ 0), lot_size = ปัดขึ้นทีละกี่หน่วย, review_months = รอบวางแผน (เดือน)"""
+        sku = sku.strip()
+        saved = stock.get(sku)
+        stock_src = "ผู้ใช้บอกในแชท"
+        if on_hand is None or on_hand < 0:
+            if saved is None or saved[0] is None:
+                return {"need_on_hand": True, "sku": sku,
+                        "message": "ยังไม่มีสต๊อกคงเหลือของ SKU นี้ ให้ถามผู้ใช้ หรือให้กรอกในแท็บแผนผลิต"}
+            on_hand, stock_src = saved[0], "ตารางสต๊อกที่กรอกไว้"
+        if on_order is None or on_order < 0:
+            on_order = (saved[1] if saved and saved[1] is not None else 0.0)
         rows = pd.DataFrame([{"sku": sku.strip(), "on_hand": on_hand, "on_order": on_order, "lot_size": lot_size}])
         res = dp.pr_calc(model, rows, review_months)
         if res.empty or "pr_qty" not in res:
             return {"error": f"ไม่พบรหัส {sku}"}
         sink.append((f"คำนวณ PR — {sku}", res))
         r = res.iloc[0]
-        return {k: (_num(v) if isinstance(v, (int, float, np.floating)) else v) for k, v in r.items()
+        return {"stock_source": stock_src, **{k: (_num(v) if isinstance(v, (int, float, np.floating)) else v) for k, v in r.items()
                 if k in ("sku", "name", "ABC_XYZ", "on_hand", "on_order", "demand_month", "demand_basis",
-                         "lead_time_days", "safety_stock", "rop", "target", "cover_months", "status", "pr_qty")}
+                         "lead_time_days", "safety_stock", "rop", "target", "cover_months", "status", "pr_qty")}}
 
     def production_plan(month: str = "", skus: str = "", abc_xyz: str = "", tier: str = "",
-                        category: str = "", weekly: bool = True, top_n: int = 25) -> dict:
+                        category: str = "", stock_text: str = "", weekly: bool = True, top_n: int = 25) -> dict:
         """แผนผลิตของเดือนที่ระบุ (หน่วย: จำนวน) พร้อมแบ่งรายสัปดาห์ตามสัดส่วนยอดขายในอดีต
         month: เช่น '2026-12' หรือ 'ธ.ค.' (เว้นว่าง = เดือนถัดไป)
         skus: รหัสคั่นด้วยจุลภาค (เว้นว่าง = ทุก SKU ที่มี forecast เดือนนั้น)
         abc_xyz: กรองกลุ่ม เช่น 'AX,AY' · tier: เช่น 'A1-Core' · category: หมวด เช่น '1,3'
-        แผนผลิต = Forecast ของเดือน (ถ้าไม่มีใช้ค่าเฉลี่ย) ยังไม่หักสต๊อกคงเหลือ"""
+        stock_text: สต๊อกคงเหลือที่ผู้ใช้บอกในแชท รูปแบบ 'รหัส=จำนวน; รหัส=จำนวน' (เว้นว่างได้)
+        SKU ที่มีสต๊อก (จากแชทหรือตารางที่กรอกไว้): แผน = ความต้องการ + Safety stock − คงเหลือ − ค้างรับ (ไม่ต่ำกว่า 0)
+        SKU ที่ไม่มีสต๊อก: แผน = ความต้องการ (ยังไม่หักสต๊อก) — ดูคอลัมน์ note"""
         mo = parse_month(month, model)
         sku_list = _split(skus) or None
-        df = dp.production_plan(model, mo, sku_list, weekly=weekly)
+        oh = {k: v[0] for k, v in stock.items() if v[0] is not None}
+        oo = {k: v[1] for k, v in stock.items() if v[1] is not None}
+        for k, v in re.findall(r"([\w\-./]+)\s*=\s*([\d,]+(?:\.\d+)?)", str(stock_text or "")):
+            oh[k.strip()] = float(v.replace(",", ""))
+        df = dp.production_plan(model, mo, sku_list, on_hand=oh, on_order=oo, weekly=weekly)
         if df.empty:
             return {"month": dp.month_label(mo), "error": "ไม่มี SKU ที่ตรงเงื่อนไข หรือยังไม่มี forecast เดือนนี้"}
         if abc_xyz:
@@ -136,9 +154,10 @@ def make_tools(model: dp.Model, sink: list):
         return {
             "month": dp.month_label(mo), "n_sku": int(len(df)), "total_plan_qty": float(df["plan_qty"].sum()),
             "weekly_total": {c: int(df[c].sum()) for c in wcols},
+            "n_sku_stock_deducted": int(df["on_hand"].notna().sum()),
             "week_split_method": "สัดส่วนยอดขาย 12 เดือนล่าสุดตามสัปดาห์ของเดือน (SKU → หมวด → ภาพรวม)",
             "rows_shown": min(top_n, len(df)),
-            "items": _records(df, ["sku", "name", "ABC_XYZ", "demand_basis", "plan_qty", *wcols], top_n),
+            "items": _records(df, ["sku", "name", "ABC_XYZ", "demand_basis", "demand", "on_hand", "plan_qty", *wcols], top_n),
         }
 
     def stockout_watch(groups: str = "AX,AY,BX", threshold: float = 0.2, top_n: int = 20) -> dict:
@@ -162,7 +181,8 @@ def system_prompt(model: dp.Model) -> str:
 1. ตัวเลขทุกตัวต้องมาจากเครื่องมือเท่านั้น ห้ามคำนวณหรือเดาตัวเลขเอง ถ้าเครื่องมือไม่มีข้อมูล ให้บอกตรง ๆ
 2. หน่วยเป็น "จำนวน" (ม้วน/ชิ้นตามสินค้า) ไม่ใช่บาท
 3. ถ้าผู้ใช้พิมพ์ชื่อสินค้าหรือรหัสไม่ครบ ใช้ find_sku ก่อน ถ้าเจอหลายตัวให้ถามว่าหมายถึงตัวไหน
-4. การคำนวณ PR ต้องรู้สต๊อกคงเหลือ ถ้าผู้ใช้ไม่บอก ให้ถามก่อน (ยังไม่มีข้อมูลสต๊อกในระบบ)
+4. การคำนวณ PR ต้องรู้สต๊อกคงเหลือ: ถ้าผู้ใช้ไม่บอก ให้เรียก pr_suggestion ด้วย on_hand=-1 ก่อน (ระบบจะใช้ตารางสต๊อกที่ผู้ใช้กรอกไว้) ถ้าได้ need_on_hand ค่อยถามผู้ใช้
+4.1 แผนผลิต: SKU ที่มีสต๊อกจะหักสต๊อกให้ (ความต้องการ + SS − คงเหลือ − ค้างรับ) ที่ไม่มีสต๊อกคือยอดตามความต้องการ ยังไม่หักสต๊อก — บอกผู้ใช้ทุกครั้งว่าหักสต๊อกไปกี่ SKU
 5. แผนผลิตรายสัปดาห์แบ่งตามสัดส่วนยอดขายในอดีตของแต่ละสัปดาห์ในเดือน (W1 = วันที่ 1–7 ... W5 = 29–สิ้นเดือน) บอกผู้ใช้ด้วย
 6. บอกเสมอว่าความต้องการมาจาก Forecast หรือค่าเฉลี่ยในอดีต
 7. สรุปตัวเลขสำคัญในคำตอบ ตารางเต็มระบบจะแสดงใต้คำตอบเอง ไม่ต้องพิมพ์ตารางยาวซ้ำ (แสดงไม่เกิน 10 แถว)

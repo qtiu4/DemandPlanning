@@ -126,13 +126,15 @@ def make_tools(model: dp.Model, sink: list, stock: dict | None = None):
                          "lead_time_days", "safety_stock", "rop", "target", "cover_months", "status", "pr_qty")}}
 
     def production_plan(month: str = "", skus: str = "", abc_xyz: str = "", tier: str = "",
-                        category: str = "", stock_text: str = "", weekly: bool = True, top_n: int = 25) -> dict:
+                        category: str = "", stock_text: str = "", min_cover_days: float = 3.0,
+                        weekly: bool = True, top_n: int = 25) -> dict:
         """แผนผลิตของเดือนที่ระบุ (หน่วย: จำนวน) เฉพาะ SKU ที่ผลิตเอง (Production = Y ในชีต Info) พร้อมแบ่งรายสัปดาห์ตามสัดส่วนยอดขายในอดีต
         month: เช่น '2026-12' หรือ 'ธ.ค.' (เว้นว่าง = เดือนถัดไป)
         skus: รหัสคั่นด้วยจุลภาค (เว้นว่าง = ทุก SKU ที่มี forecast เดือนนั้น)
         abc_xyz: กรองกลุ่ม เช่น 'AX,AY' · tier: เช่น 'A1-Core' · category: หมวด เช่น '1,3'
         stock_text: สต๊อกคงเหลือที่ผู้ใช้บอกในแชท รูปแบบ 'รหัส=จำนวน; รหัส=จำนวน' (เว้นว่างได้)
-        SKU ที่มีสต๊อก (จากแชทหรือตารางที่กรอกไว้): แผน = ความต้องการ + Safety stock − คงเหลือ − ค้างรับ (ไม่ต่ำกว่า 0)
+        SKU ที่มีสต๊อก (จากแชทหรือตารางที่กรอกไว้): Rolling plan — ยอดขาย/วัน = ความต้องการ ÷ วันในเดือน,
+        ผลิตต้นสัปดาห์ให้สต๊อกปลายสัปดาห์พอขาย ≥ min_cover_days วัน (ค่าตั้งต้น 3), หมวดที่มีขั้นต่ำผลิต ≥ ขั้นต่ำ/รอบ
         SKU ที่ไม่มีสต๊อก: แผน = ความต้องการ (ยังไม่หักสต๊อก) — ดูคอลัมน์ note"""
         mo = parse_month(month, model)
         sku_list = _split(skus) or None
@@ -140,7 +142,8 @@ def make_tools(model: dp.Model, sink: list, stock: dict | None = None):
         oo = {k: v[1] for k, v in stock.items() if v[1] is not None}
         for k, v in re.findall(r"([\w\-./]+)\s*=\s*([\d,]+(?:\.\d+)?)", str(stock_text or "")):
             oh[k.strip()] = float(v.replace(",", ""))
-        df = dp.production_plan(model, mo, sku_list, on_hand=oh, on_order=oo, weekly=weekly)
+        df = dp.production_plan(model, mo, sku_list, on_hand=oh, on_order=oo, weekly=True,
+                                min_cover_days=float(min_cover_days))
         if df.empty:
             return {"month": dp.month_label(mo), "error": "ไม่มี SKU ที่ตรงเงื่อนไข (ต้องเป็นสินค้าที่ผลิตเอง Production = Y) หรือยังไม่มี forecast เดือนนี้"}
         if abc_xyz:
@@ -158,7 +161,10 @@ def make_tools(model: dp.Model, sink: list, stock: dict | None = None):
             "n_sku_stock_deducted": int(df["on_hand"].notna().sum()),
             "week_split_method": "สัดส่วนยอดขาย 12 เดือนล่าสุดตามสัปดาห์ของเดือน (SKU → หมวด → ภาพรวม)",
             "rows_shown": min(top_n, len(df)),
-            "items": _records(df, ["sku", "name", "ABC_XYZ", "demand_basis", "demand", "on_hand", "plan_qty", *wcols], top_n),
+            "min_batch_rule": "หมวดที่มีขั้นต่ำ (ค่าตั้งต้นหมวด 1 และ 3 = 100) สัปดาห์ที่น้อยกว่าขั้นต่ำถูกรวบไปผลิตพร้อมสัปดาห์ก่อนหน้า ทั้งเดือนไม่ถึงขั้นต่ำผลิตครั้งเดียว W1 · หมวดอื่นผลิตตามสัปดาห์",
+            "n_sku_below_cover": int((df["cover_days_now"] < float(min_cover_days)).sum()),
+            "items": _records(df, ["sku", "name", "category", "ABC_XYZ", "demand_basis", "demand", "daily_demand", "on_hand",
+                                   "cover_days_now", "plan_qty", *wcols, "end_stock", "end_cover_days", "batch_note", "note"], top_n),
         }
 
     def stockout_watch(groups: str = "AX,AY,BX", threshold: float = 0.2, top_n: int = 20) -> dict:
@@ -184,8 +190,9 @@ def system_prompt(model: dp.Model) -> str:
 3. ถ้าผู้ใช้พิมพ์ชื่อสินค้าหรือรหัสไม่ครบ ใช้ find_sku ก่อน ถ้าเจอหลายตัวให้ถามว่าหมายถึงตัวไหน
    ถ้าให้รหัสครบแล้ว เรียกเครื่องมือหลัก (pr_suggestion / production_plan / stockout_watch) ได้ทันที ไม่ต้องเรียก find_sku หรือ sku_info ก่อน — เรียกเครื่องมือให้น้อยครั้งที่สุด
 4. การคำนวณ PR ต้องรู้สต๊อกคงเหลือ: ถ้าผู้ใช้ไม่บอก ให้เรียก pr_suggestion ด้วย on_hand=-1 ก่อน (ระบบจะใช้ตารางสต๊อกที่ผู้ใช้กรอกไว้) ถ้าได้ need_on_hand ค่อยถามผู้ใช้
-4.1 แผนผลิต: SKU ที่มีสต๊อกจะหักสต๊อกให้ (ความต้องการ + SS − คงเหลือ − ค้างรับ) ที่ไม่มีสต๊อกคือยอดตามความต้องการ ยังไม่หักสต๊อก — บอกผู้ใช้ทุกครั้งว่าหักสต๊อกไปกี่ SKU
+4.1 แผนผลิต: SKU ที่มีสต๊อกใช้ Rolling plan (ยอดขาย/วัน = ความต้องการ ÷ วันในเดือน · cover day = สต๊อก ÷ ยอดขาย/วัน · ผลิตต้นสัปดาห์ให้สต๊อกปลายสัปดาห์ ≥ 3 cover day) ที่ไม่มีสต๊อกคือยอดตามความต้องการ ยังไม่หักสต๊อก — บอกผู้ใช้ทุกครั้งว่ากี่ SKU ใช้ rolling และกี่ SKU ต่ำกว่า 3 วันแล้ว (ต้องผลิตด่วน)
 5. แผนผลิตมีเฉพาะสินค้าที่ผลิตเอง (Production = Y) สินค้าซื้อมาขายไม่อยู่ในแผน ถ้าผู้ใช้ถามถึงสินค้าที่ไม่อยู่ในแผน ให้บอกเหตุผลนี้ (ใช้ pr_suggestion ได้ถ้าต้องการสั่งซื้อ)
+5.2 แผนรายสัปดาห์ถูกรวบตามขั้นต่ำการผลิต (min_batch_rule) อธิบายให้ผู้ใช้เมื่อเกี่ยวข้อง
 5.1 แผนผลิตรายสัปดาห์แบ่งตามสัดส่วนยอดขายในอดีตของแต่ละสัปดาห์ในเดือน (W1 = วันที่ 1–7 ... W5 = 29–สิ้นเดือน) บอกผู้ใช้ด้วย
 6. บอกเสมอว่าความต้องการมาจาก Forecast หรือค่าเฉลี่ยในอดีต
 7. สรุปตัวเลขสำคัญในคำตอบ ตารางเต็มระบบจะแสดงใต้คำตอบเอง ไม่ต้องพิมพ์ตารางยาวซ้ำ (แสดงไม่เกิน 10 แถว)
@@ -254,14 +261,19 @@ def quick_answer(text: str, model: dp.Model, sink: list, stock: dict | None = No
             return f"แผน {r['month']}: {r['error']}"
         wk = "\n".join(f"| {k} | {v:,} |" for k, v in r["weekly_total"].items())
         ded = r.get("n_sku_stock_deducted", 0)
-        top = "\n".join(f"| {i['sku']} | {i.get('ABC_XYZ') or ''} | {_f(i['plan_qty'])} |" for i in r["items"][:10])
+        top = "\n".join(f"| {i['sku']} | {i.get('ABC_XYZ') or ''} | {_f(i.get('on_hand'))} | {_f(i.get('cover_days_now'), 1)} | "
+                        f"{_f(i['plan_qty'])} | {i.get('batch_note') or ''} |" for i in r["items"][:10])
         return (f"**แผนผลิต {r['month']}**{' กลุ่ม ' + ', '.join(groups) if groups else ''} — "
                 f"{r['n_sku']:,} SKU (เฉพาะสินค้าผลิตเอง Production = Y) รวม **{_f(r['total_plan_qty'])} หน่วย**\n\n"
                 f"| สัปดาห์ | จำนวน |\n|---|---:|\n{wk}\n\n"
                 f"แบ่งรายสัปดาห์ตามสัดส่วนยอดขาย 12 เดือนล่าสุดของแต่ละ SKU (ประวัติน้อย → ใช้ของหมวด) · "
-                + (f"หักสต๊อกคงเหลือแล้ว {ded:,} SKU ที่เหลือยังไม่หัก" if ded else
+                f"หมวดที่มีขั้นต่ำ ({', '.join(f'หมวด {k} = {v:,.0f}' for k, v in sorted(dp.min_batch_map(model).items()))}) "
+                f"สัปดาห์ที่ไม่ถึงขั้นต่ำรวบไปผลิตพร้อมสัปดาห์ก่อนหน้า · "
+                + (f"Rolling plan จากสต๊อก {ded:,} SKU (ปลายสัปดาห์พอขาย ≥ 3 วัน"
+                   + (f" · ⚠️ ต่ำกว่า 3 วันแล้ว {r['n_sku_below_cover']:,} SKU" if r.get('n_sku_below_cover') else "")
+                   + ") ที่เหลือยังไม่หักสต๊อก" if ded else
                    "ยังไม่หักสต๊อกคงเหลือ (กรอกได้ในแท็บ 📅 แผนผลิต)")
-                + f"\n\n**10 อันดับแรก**\n\n| รหัส | กลุ่ม | แผนผลิต |\n|---|---|---:|\n{top}")
+                + f"\n\n**10 อันดับแรก**\n\n| รหัส | กลุ่ม | คงเหลือ | พอขาย (วัน) | แผนผลิต | รอบผลิต |\n|---|---|---:|---:|---:|---|\n{top}")
 
     # 3) เสี่ยงของขาด
     if re.search(r"เสี่ยง|ของขาด|ขาดสต๊อก|ขาดสต็อก|stockout", t, re.I):

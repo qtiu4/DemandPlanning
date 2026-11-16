@@ -549,21 +549,85 @@ def _split_int(total: float, shares: np.ndarray) -> np.ndarray:
     return base
 
 
+MIN_BATCH = {1: 100, 3: 100}     # ขั้นต่ำต่อการผลิต 1 ครั้ง ตามหมวด (หมวดอื่นผลิตทีละนิดได้)
+
+
+def min_batch_map(model: Model) -> dict:
+    """ขั้นต่ำต่อครั้ง: ค่าตั้งต้น MIN_BATCH · แก้ได้ในชีต Config คอลัมน์ min_batch_<หมวด> เช่น min_batch_1"""
+    out = dict(MIN_BATCH)
+    for k, v in (model.config or {}).items():
+        if str(k).lower().startswith("min_batch_"):
+            try:
+                out[int(float(str(k).split("_")[-1]))] = float(v)
+            except (TypeError, ValueError):
+                pass
+    return out
+
+
+def consolidate_weeks(w: np.ndarray, min_qty: float) -> np.ndarray:
+    """รวบแผนรายสัปดาห์ที่น้อยกว่าขั้นต่ำ ไปผลิตพร้อมสัปดาห์ก่อนหน้า (ผลิตก่อนดีกว่าผลิตช้า)
+    ผลรวมเท่าเดิม · ถ้าทั้งเดือนยังไม่ถึงขั้นต่ำ ผลิตครั้งเดียวในสัปดาห์แรก"""
+    w = np.asarray(w, dtype=int).copy()
+    total = int(w.sum())
+    if total <= 0 or not min_qty or min_qty <= 0:
+        return w
+    if total < min_qty:
+        return np.r_[total, np.zeros(len(w) - 1, dtype=int)]
+    for i in range(len(w) - 1, 0, -1):
+        if 0 < w[i] < min_qty:
+            w[i - 1] += w[i]
+            w[i] = 0
+    if 0 < w[0] < min_qty:                      # สัปดาห์แรกยังน้อย → ดึงรอบถัดไปมารวมผลิตเร็วขึ้น
+        j = next(i for i in range(1, len(w)) if w[i] > 0)
+        w[0] += w[j]
+        w[j] = 0
+    return w
+
+
 def default_plan_month(model: Model) -> int:
     future = [mk for mk in model.fc_months if mk > model.last_month]
     return future[0] if future else month_add(model.last_month, 1)
 
 
+MIN_COVER_DAYS = 3      # สต๊อกปลายแต่ละสัปดาห์ต้องพอขายอย่างน้อยกี่วัน
+
+
+def rolling_weeks(demand_w: np.ndarray, start_stock: float, daily: float,
+                  min_cover_days: float, min_batch: float = 0) -> tuple[np.ndarray, np.ndarray]:
+    """Rolling plan รายสัปดาห์: ผลิตต้นสัปดาห์ให้สต๊อกปลายสัปดาห์ ≥ min_cover_days × ยอดขายต่อวัน
+    ถ้าหมวดมีขั้นต่ำ ผลิตอย่างน้อย min_batch ต่อรอบ (ส่วนเกินยกไปใช้สัปดาห์ถัดไป)
+    คืน (จำนวนผลิตรายสัปดาห์, สต๊อกปลายสัปดาห์)"""
+    target = min_cover_days * daily
+    stock, prod, ends = float(start_stock), [], []
+    for dem in demand_w:
+        end = stock - dem
+        need = target - end
+        q = 0
+        if need > 1e-9:
+            q = int(np.ceil(need))
+            if min_batch and q < min_batch:
+                q = int(min_batch)
+        stock = end + q
+        prod.append(q)
+        ends.append(stock)
+    return np.array(prod, dtype=int), np.array(ends)
+
+
 def production_plan(model: Model, month: int | None = None, skus: list[str] | None = None,
                     on_hand: dict | None = None, on_order: dict | None = None,
-                    weekly: bool = True, production_only: bool = True) -> pd.DataFrame:
-    """แผนผลิตรายเดือน (เฉพาะ SKU ที่ชีต Info คอลัมน์ Production = Y เมื่อ production_only=True) (+ แบ่งรายสัปดาห์ตามสัดส่วนการขายในอดีต) — หน่วย: จำนวน
+                    weekly: bool = True, production_only: bool = True,
+                    min_batch: dict | None = None, round_up_min: bool = False,
+                    min_cover_days: float = MIN_COVER_DAYS) -> pd.DataFrame:
+    """แผนผลิตรายเดือน + รายสัปดาห์ (หน่วย: จำนวน) เฉพาะ SKU ที่ Info คอลัมน์ Production = Y
 
-    ความต้องการ = Forecast ของเดือนนั้น (ถ้าไม่มี ใช้ค่าเฉลี่ยในอดีต)
-    ถ้าให้สต๊อกคงเหลือมา: แผนผลิต = ความต้องการ + Safety stock − คงเหลือ − ค้างรับ (ไม่ต่ำกว่า 0)
-    ถ้าไม่ให้: แผนผลิต = ความต้องการ
+    ความต้องการ/เดือน = Forecast ของเดือนนั้น (ไม่มี → ค่าเฉลี่ยในอดีต) กระจายรายสัปดาห์ตามสัดส่วนการขายในอดีต
+    ยอดขายต่อวัน = ความต้องการ/เดือน ÷ จำนวนวันในเดือน · cover day = สต๊อก ÷ ยอดขายต่อวัน
+    • มีสต๊อกคงเหลือ → Rolling plan: สต๊อกตั้งต้น = คงเหลือ + ค้างรับ (ถือว่าเข้าต้นเดือน)
+      ผลิตต้นสัปดาห์ให้สต๊อกปลายสัปดาห์ไม่ต่ำกว่า min_cover_days วัน · หมวดที่มีขั้นต่ำผลิตอย่างน้อยขั้นต่ำ/รอบ
+    • ไม่มีสต๊อก → แผน = ความต้องการ แบ่งตามสัดส่วน แล้วรวบสัปดาห์ที่ต่ำกว่าขั้นต่ำ
     """
     month = int(month or default_plan_month(model))
+    mb = min_batch_map(model) if min_batch is None else min_batch
     on_hand, on_order = on_hand or {}, on_order or {}
     m = model.master.drop_duplicates("sku").set_index("sku")
     fc = model.fc[model.fc["month"] == month].set_index("sku")["forecast_qty"]
@@ -572,7 +636,12 @@ def production_plan(model: Model, month: int | None = None, skus: list[str] | No
     if production_only and "Production" in m.columns:
         prod = m["Production"].astype(str).str.strip().str.upper().eq("Y")
         skus = [k for k in skus if k in m.index and prod.get(k, False)]
-    rows = []
+    days = pd.Period(year=month // 100, month=month % 100, freq="M").days_in_month
+    use = WEEK_BINS if days >= 29 else WEEK_BINS[:4]
+    labels = week_labels(month)
+    sh = week_shares(model)
+
+    rows, split = [], []
     for sku in skus:
         if sku not in m.index:
             continue
@@ -582,29 +651,56 @@ def production_plan(model: Model, month: int | None = None, skus: list[str] | No
         else:
             d, basis = float(s.get("mean_monthly_qty") or 0) if pd.notna(s.get("mean_monthly_qty")) else 0.0, "ค่าเฉลี่ยในอดีต"
         ss = float(s.get("safety_stock")) if pd.notna(s.get("safety_stock")) else 0.0
-        oh, oo = on_hand.get(sku), float(on_order.get(sku, 0) or 0)
-        if str(s.get("Status", "")).lower() == "inactive" or s.get("priority_tier") == "A4-Fading":
-            plan, note = 0.0, "Inactive/Fading — ไม่วางแผนผลิต"
-        elif oh is not None:
-            plan, note = max(0.0, d + ss - float(oh) - oo), "หักสต๊อกคงเหลือแล้ว"
-        else:
-            plan, note = d, "ยังไม่หักสต๊อก (ไม่ได้ระบุคงเหลือ)"
-        rows.append({"sku": sku, "name": s.get("name"), "category": s.get("category"),
+        oh = on_hand.get(sku)
+        oo = float(on_order.get(sku, 0) or 0)
+        cat = s.get("category")
+        mn = float(mb.get(int(cat), 0) or 0) if pd.notna(cat) else 0.0
+        daily = d / days
+        shares = sh.loc[sku, use].to_numpy(float) if sku in sh.index else np.ones(len(use))
+        shares = shares / shares.sum() if shares.sum() > 0 else np.ones(len(use)) / len(use)
+        wsrc = sh.loc[sku, "week_source"] if sku in sh.index else "เท่ากัน"
+        start = None if oh is None else float(oh) + oo
+        cover_now = (start / daily) if (start is not None and daily > 0) else None
+        end_stock = end_cover = None
+        inactive = str(s.get("Status", "")).lower() == "inactive" or s.get("priority_tier") == "A4-Fading"
+
+        if inactive:
+            w, note, bn = np.zeros(len(use), dtype=int), "Inactive/Fading — ไม่วางแผนผลิต", ""
+        elif start is not None:                                   # ---- rolling plan
+            w, ends = rolling_weeks(d * shares, start, daily, min_cover_days, mn)
+            end_stock = float(ends[-1])
+            end_cover = end_stock / daily if daily > 0 else None
+            note = f"Rolling: สต๊อก {start:,.0f} พอขาย {cover_now:,.1f} วัน" if cover_now is not None else "Rolling"
+            if cover_now is not None and cover_now < min_cover_days:
+                note = "⚠️ ต่ำกว่า " + f"{min_cover_days:g} วันแล้ว ผลิตด่วน · " + note
+            runs = int((w > 0).sum())
+            bn = (f"{runs} รอบ" + (f" (ขั้นต่ำ {mn:,.0f}/รอบ)" if mn else "")) if runs else "สต๊อกพอทั้งเดือน"
+        else:                                                    # ---- ไม่มีสต๊อก
+            plan = float(np.ceil(d))
+            if round_up_min and 0 < plan < mn:
+                plan = mn
+            raw = _split_int(plan, shares)
+            w = consolidate_weeks(raw, mn)
+            note = "ยังไม่หักสต๊อก (ไม่ได้ระบุคงเหลือ)"
+            if mn and plan > 0:
+                n_runs = int((w > 0).sum())
+                bn = (f"ต่ำกว่าขั้นต่ำ {mn:,.0f} — รวบผลิตครั้งเดียว" if plan < mn else
+                      f"รวบเป็น {n_runs} รอบ (ขั้นต่ำ {mn:,.0f}/รอบ)" if not np.array_equal(raw, w) else f"{n_runs} รอบ")
+            else:
+                bn = "ผลิตตามสัปดาห์" if plan > 0 else ""
+        rows.append({"sku": sku, "name": s.get("name"), "category": cat, "min_batch": mn,
                      "ABC_XYZ": s.get("ABC_XYZ"), "priority_tier": s.get("priority_tier"),
-                     "month": month, "demand": round(d, 1), "demand_basis": basis, "safety_stock": ss,
+                     "month": month, "demand": round(d, 1), "demand_basis": basis,
+                     "daily_demand": round(daily, 2), "safety_stock": ss,
                      "on_hand": oh, "on_order": oo if oh is not None else None,
-                     "plan_qty": float(np.ceil(plan)), "note": note})
+                     "cover_days_now": None if cover_now is None else round(cover_now, 1),
+                     "plan_qty": float(w.sum()),
+                     "end_stock": None if end_stock is None else round(end_stock),
+                     "end_cover_days": None if end_cover is None else round(end_cover, 1),
+                     "batch_note": bn, "week_source": wsrc, "note": note})
+        split.append(w)
     df = pd.DataFrame(rows)
-    if not weekly or df.empty:
+    if df.empty or not weekly:
         return df
-    sh = week_shares(model)
-    days = pd.Period(year=month // 100, month=month % 100, freq="M").days_in_month
-    use = WEEK_BINS if days >= 29 else WEEK_BINS[:4]
-    labels = week_labels(month)
-    split, src = [], []
-    for r in df.itertuples():
-        w = sh.loc[r.sku, use].to_numpy(float) if r.sku in sh.index else np.ones(len(use))
-        split.append(_split_int(r.plan_qty, w))
-        src.append(sh.loc[r.sku, "week_source"] if r.sku in sh.index else "เท่ากัน")
     wk = pd.DataFrame(split, columns=labels, index=df.index)
-    return pd.concat([df, wk], axis=1).assign(week_source=src)
+    return pd.concat([df, wk], axis=1)

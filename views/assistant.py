@@ -41,7 +41,7 @@ def _err_text(e: Exception) -> str:
     return f"เกิดข้อผิดพลาด: {s[:300]}"
 
 
-ASSISTANT_VERSION = "1.6"
+ASSISTANT_VERSION = "1.8"
 FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.7-flash-lite", "gemini-3.5-flash-lite",
                    "gemini-3-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
@@ -259,11 +259,25 @@ with tab_plan:
     mo = c1.selectbox("เดือนที่วางแผน", months, format_func=dp.month_label)
     only_fc = c2.radio("SKU ที่รวมในแผน (เฉพาะ Production = Y)", ["เฉพาะที่มี Forecast", "ทุก SKU ตามตัวกรอง (ไม่มี FC ใช้ค่าเฉลี่ย)"],
                        horizontal=True)
+    with st.expander("🏭 ขั้นต่ำการผลิตต่อครั้ง (รวบสัปดาห์ที่น้อยกว่าขั้นต่ำ)", expanded=False):
+        mb0 = dp.min_batch_map(model)
+        cats = sorted(int(c) for c in model.master["category"].dropna().unique())
+        mcols = st.columns(len(cats) + 1)
+        mb = {c: mcols[i].number_input(f"หมวด {c}", min_value=0, step=10, value=int(mb0.get(c, 0)), key=f"mb_{c}",
+                                       help="0 = ผลิตทีละนิดได้ ไม่ต้องรวบ") for i, c in enumerate(cats)}
+        round_up = mcols[-1].toggle("ปัดแผนเดือนที่ต่ำกว่าขั้นต่ำขึ้นเป็นขั้นต่ำ", value=False,
+                                    help="ใช้กับ SKU ที่ไม่ได้กรอกสต๊อก · SKU ที่กรอกสต๊อกผลิตขั้นต่ำต่อรอบอยู่แล้ว")
+        min_cover = st.number_input("สต๊อกปลายสัปดาห์ต้องพอขายอย่างน้อย (cover day)", min_value=0.0, max_value=60.0,
+                                    value=float(dp.MIN_COVER_DAYS), step=1.0, key="min_cover",
+                                    help="ใช้กับ SKU ที่กรอกสต๊อกคงเหลือ (Rolling plan)")
+        st.caption("สัปดาห์ที่น้อยกว่าขั้นต่ำจะถูกรวบไปผลิตพร้อมสัปดาห์ก่อนหน้า (ผลิตก่อนดีกว่าผลิตช้า) · "
+                   "ถ้าทั้งเดือนยังไม่ถึงขั้นต่ำ ผลิตครั้งเดียวในสัปดาห์แรก · "
+                   "ค่าตั้งต้นแก้ถาวรได้ที่ชีต Config คอลัมน์ min_batch_1, min_batch_3")
     sku_list = None if only_fc.startswith("เฉพาะ") else sorted(skus)
 
     with st.expander(f"📦 สต๊อกคงเหลือปัจจุบัน (ไม่บังคับ) — กรอกแล้ว {sum(v[0] is not None for v in STOCK.values()):,} SKU",
                      expanded=False):
-        st.caption("กรอกเฉพาะ SKU ที่รู้ยอด · SKU ที่กรอก: แผนผลิต = ความต้องการ + SS − คงเหลือ − ค้างรับ · "
+        st.caption("กรอกเฉพาะ SKU ที่รู้ยอด · SKU ที่กรอกจะวางแผนแบบ Rolling ให้สต๊อกปลายสัปดาห์ไม่ต่ำกว่า cover day ที่ตั้ง · "
                    "ที่ไม่กรอก: แผน = ความต้องการ (ยังไม่หักสต๊อก) · ผู้ช่วย AI ใช้ตัวเลขชุดนี้ด้วย · "
                    "ค่าจะหายเมื่อปิดเบราว์เซอร์ — เก็บถาวรได้ด้วยไฟล์ CSV")
         up = st.file_uploader("อัปโหลดไฟล์สต๊อก (CSV/Excel คอลัมน์: sku, on_hand, on_order)", type=["csv", "xlsx"])
@@ -310,7 +324,8 @@ with tab_plan:
 
     on_hand = {k: v[0] for k, v in STOCK.items() if v[0] is not None}
     on_order = {k: v[1] for k, v in STOCK.items() if v[1] is not None}
-    plan = dp.production_plan(model, mo, sku_list, on_hand=on_hand, on_order=on_order)
+    plan = dp.production_plan(model, mo, sku_list, on_hand=on_hand, on_order=on_order,
+                              min_batch=mb, round_up_min=round_up, min_cover_days=min_cover)
     plan = plan[plan["sku"].isin(skus)] if len(plan) else plan
     if plan.empty:
         st.info("ไม่มี SKU ตามเงื่อนไข")
@@ -320,8 +335,11 @@ with tab_plan:
         c = st.columns(4)
         ui.kpi(c[0], "แผนผลิตรวม", ui.fmt_num(plan["plan_qty"].sum()), f"{dp.month_label(mo)} · หน่วย", ui.BLUE, "🏭")
         ui.kpi(c[1], "จำนวน SKU", f"{(plan['plan_qty'] > 0).sum():,}", f"จาก {len(plan):,} SKU", ui.TEAL, "📦")
-        ui.kpi(c[2], "ใช้ Forecast", f"{(plan['demand_basis'] == 'Forecast').sum():,} SKU",
-               f"ค่าเฉลี่ยในอดีต {(plan['demand_basis'] != 'Forecast').sum():,} SKU", ui.ORANGE, "🎯")
+        rolled = plan["on_hand"].notna()
+        urgent = int((plan["cover_days_now"] < min_cover).sum())
+        ui.kpi(c[2], "Rolling plan (มีสต๊อก)", f"{int(rolled.sum()):,} SKU",
+               f"⚠️ ต่ำกว่า {min_cover:g} วัน {urgent:,} SKU" if urgent else f"ไม่มีตัวที่ต่ำกว่า {min_cover:g} วัน",
+               ui.RED if urgent else ui.ORANGE, "🔁")
         busiest = plan[wcols].sum().idxmax()
         ui.kpi(c[3], "สัปดาห์ที่ผลิตมากสุด", busiest.split(" ")[0], busiest.split(" ", 1)[1].strip("()"), ui.PURPLE, "📅")
 
@@ -332,18 +350,21 @@ with tab_plan:
                                    text=[f"{v:,.0f}" for v in wt.values], textposition="outside"))
             fig.update_yaxes(tickformat=",.0f")
             st.plotly_chart(ui.style(fig, 320, legend=False), use_container_width=True)
-            n_ded = int(plan["on_hand"].notna().sum())
-            st.caption("สัดส่วนคิดจากยอดขาย 12 เดือนล่าสุดของแต่ละ SKU ตามช่วงวันที่ในเดือน "
-                       "(SKU ที่มีประวัติน้อยกว่า 3 เดือน ใช้สัดส่วนของหมวด) · "
-                       + (f"หักสต๊อกคงเหลือแล้ว {n_ded:,} SKU · ที่เหลือยังไม่หักสต๊อก" if n_ded
-                          else "ยังไม่หักสต๊อกคงเหลือ — กรอกได้ในช่อง 📦 ด้านบน"))
+            n_ded = int(rolled.sum())
+            st.caption("ยอดขายรายสัปดาห์กระจายตามสัดส่วนยอดขาย 12 เดือนล่าสุด (ประวัติน้อย → ใช้ของหมวด) · "
+                       f"**SKU ที่กรอกสต๊อก ({n_ded:,})**: Rolling plan — ยอดขาย/วัน = ความต้องการ ÷ วันในเดือน, "
+                       f"ผลิตต้นสัปดาห์ให้สต๊อกปลายสัปดาห์พอขาย ≥ {min_cover:g} วัน, หมวดที่มีขั้นต่ำผลิต ≥ ขั้นต่ำ/รอบ "
+                       "(ค้างรับถือว่าเข้าต้นเดือน) · **SKU ที่ไม่กรอกสต๊อก**: แผน = ความต้องการ แล้วรวบสัปดาห์ที่ต่ำกว่าขั้นต่ำ")
 
-        cols = ["sku", "name", "category", "ABC_XYZ", "priority_tier", "demand_basis", "demand", "safety_stock",
-                "on_hand", "on_order", "plan_qty", *wcols, "week_source", "note"]
+        cols = ["sku", "name", "category", "ABC_XYZ", "priority_tier", "demand_basis", "demand", "daily_demand",
+                "on_hand", "on_order", "cover_days_now", "plan_qty", *wcols, "end_stock", "end_cover_days",
+                "batch_note", "week_source", "note"]
         st.dataframe(plan[cols], hide_index=True, use_container_width=True, height=480, column_config={
             **ui.SKU_COLS, "category": "หมวด", "demand_basis": "ความต้องการจาก",
             "plan_qty": ui.num("แผนผลิต (หน่วย)"), "safety_stock": ui.num("SS"), "demand": ui.num("ความต้องการ"),
-            "on_hand": ui.num("คงเหลือ"), "on_order": ui.num("ค้างรับ"),
-            "week_source": "สัดส่วนสัปดาห์จาก", "note": "หมายเหตุ", **{w: ui.num(w) for w in wcols}})
+            "on_hand": ui.num("คงเหลือ"), "on_order": ui.num("ค้างรับ"), "daily_demand": ui.num("ขาย/วัน", 1),
+            "cover_days_now": ui.num("พอขาย (วัน)", 1), "end_stock": ui.num("สต๊อกปลายเดือน"),
+            "end_cover_days": ui.num("ปลายเดือนพอขาย (วัน)", 1),
+            "week_source": "สัดส่วนสัปดาห์จาก", "batch_note": "รอบผลิต", "note": "หมายเหตุ", **{w: ui.num(w) for w in wcols}})
         st.download_button("⬇️ ดาวน์โหลดแผนผลิต (CSV)", plan[cols].to_csv(index=False).encode("utf-8-sig"),
                            file_name=f"production_plan_{mo}.csv", mime="text/csv")

@@ -492,3 +492,116 @@ def pr_calc(model: Model, rows: pd.DataFrame, review_months: float = 1.0) -> pd.
             "cover_months": (avail / d) if d > 0 else np.inf, "status": status, "pr_qty": pr,
         })
     return pd.DataFrame(out)
+
+
+# ---------------------------------------------------------------- weekly split / production plan
+WEEK_BINS = ["W1", "W2", "W3", "W4", "W5"]          # วันที่ 1–7, 8–14, 15–21, 22–28, 29–สิ้นเดือน
+
+
+def week_shares(model: Model, months_back: int = 12, min_months: int = 3) -> pd.DataFrame:
+    """สัดส่วนยอดขายในแต่ละสัปดาห์ของเดือน จากประวัติการขาย (NV/IV)
+
+    ใช้ของ SKU เองถ้ามียอดขาย ≥ min_months เดือนในช่วงที่ดู · ไม่พอใช้ของหมวด · ไม่พอใช้ภาพรวม
+    """
+    s = model.sales[model.sales["date"] > model.last_date - pd.DateOffset(months=months_back)].copy()
+    s["wk"] = ((s["date"].dt.day - 1) // 7).clip(upper=4).map(dict(enumerate(WEEK_BINS)))
+    cat = model.master.drop_duplicates("sku").set_index("sku")["category"]
+    s["category"] = s["sku"].map(cat)
+
+    def shares(df, key):
+        p = df.pivot_table(index=key, columns="wk", values="qty", aggfunc="sum").reindex(columns=WEEK_BINS).fillna(0)
+        return p.div(p.sum(axis=1).replace(0, np.nan), axis=0)
+
+    overall = shares(s.assign(k="all"), "k").iloc[0]
+    by_cat = shares(s.dropna(subset=["category"]), "category")
+    active = s.groupby("sku")["month"].nunique()
+    by_sku = shares(s[s["sku"].isin(active[active >= min_months].index)], "sku")
+
+    out = []
+    for sku in model.master["sku"].unique():
+        if sku in by_sku.index and by_sku.loc[sku].notna().all():
+            row, src = by_sku.loc[sku], "SKU"
+        elif pd.notna(cat.get(sku)) and cat.get(sku) in by_cat.index:
+            row, src = by_cat.loc[cat.get(sku)], f"หมวด {int(cat.get(sku))}"
+        else:
+            row, src = overall, "ภาพรวม"
+        out.append([sku, *row.tolist(), src])
+    return pd.DataFrame(out, columns=["sku", *WEEK_BINS, "week_source"]).set_index("sku")
+
+
+def week_labels(month: int) -> list[str]:
+    """ป้ายสัปดาห์ของเดือนนั้น เช่น 'W1 (1–7 ธ.ค.)'"""
+    days = pd.Period(year=month // 100, month=month % 100, freq="M").days_in_month
+    mn = TH_MONTH[month % 100 - 1]
+    rng = [(1, 7), (8, 14), (15, 21), (22, 28), (29, days)]
+    return [f"{w} ({a}–{b} {mn})" for w, (a, b) in zip(WEEK_BINS, rng) if a <= days]
+
+
+def _split_int(total: float, shares: np.ndarray) -> np.ndarray:
+    """แบ่งจำนวนเต็มตามสัดส่วนโดยผลรวมยังเท่าเดิม (largest remainder)"""
+    total = int(round(total))
+    if total <= 0 or not np.isfinite(shares).all() or shares.sum() <= 0:
+        return np.zeros(len(shares), dtype=int)
+    raw = shares / shares.sum() * total
+    base = np.floor(raw).astype(int)
+    rem = total - base.sum()
+    base[np.argsort(-(raw - base))[:rem]] += 1
+    return base
+
+
+def default_plan_month(model: Model) -> int:
+    future = [mk for mk in model.fc_months if mk > model.last_month]
+    return future[0] if future else month_add(model.last_month, 1)
+
+
+def production_plan(model: Model, month: int | None = None, skus: list[str] | None = None,
+                    on_hand: dict | None = None, on_order: dict | None = None,
+                    weekly: bool = True) -> pd.DataFrame:
+    """แผนผลิตรายเดือน (+ แบ่งรายสัปดาห์ตามสัดส่วนการขายในอดีต) — หน่วย: จำนวน
+
+    ความต้องการ = Forecast ของเดือนนั้น (ถ้าไม่มี ใช้ค่าเฉลี่ยในอดีต)
+    ถ้าให้สต๊อกคงเหลือมา: แผนผลิต = ความต้องการ + Safety stock − คงเหลือ − ค้างรับ (ไม่ต่ำกว่า 0)
+    ถ้าไม่ให้: แผนผลิต = ความต้องการ
+    """
+    month = int(month or default_plan_month(model))
+    on_hand, on_order = on_hand or {}, on_order or {}
+    m = model.master.drop_duplicates("sku").set_index("sku")
+    fc = model.fc[model.fc["month"] == month].set_index("sku")["forecast_qty"]
+    if skus is None:
+        skus = fc.index.tolist()
+    rows = []
+    for sku in skus:
+        if sku not in m.index:
+            continue
+        s = m.loc[sku]
+        if pd.notna(fc.get(sku)):
+            d, basis = float(fc[sku]), "Forecast"
+        else:
+            d, basis = float(s.get("mean_monthly_qty") or 0) if pd.notna(s.get("mean_monthly_qty")) else 0.0, "ค่าเฉลี่ยในอดีต"
+        ss = float(s.get("safety_stock")) if pd.notna(s.get("safety_stock")) else 0.0
+        oh, oo = on_hand.get(sku), float(on_order.get(sku, 0) or 0)
+        if str(s.get("Status", "")).lower() == "inactive" or s.get("priority_tier") == "A4-Fading":
+            plan, note = 0.0, "Inactive/Fading — ไม่วางแผนผลิต"
+        elif oh is not None:
+            plan, note = max(0.0, d + ss - float(oh) - oo), "หักสต๊อกคงเหลือแล้ว"
+        else:
+            plan, note = d, "ยังไม่หักสต๊อก (ไม่ได้ระบุคงเหลือ)"
+        rows.append({"sku": sku, "name": s.get("name"), "category": s.get("category"),
+                     "ABC_XYZ": s.get("ABC_XYZ"), "priority_tier": s.get("priority_tier"),
+                     "month": month, "demand": round(d, 1), "demand_basis": basis, "safety_stock": ss,
+                     "on_hand": oh, "on_order": oo if oh is not None else None,
+                     "plan_qty": float(np.ceil(plan)), "note": note})
+    df = pd.DataFrame(rows)
+    if not weekly or df.empty:
+        return df
+    sh = week_shares(model)
+    days = pd.Period(year=month // 100, month=month % 100, freq="M").days_in_month
+    use = WEEK_BINS if days >= 29 else WEEK_BINS[:4]
+    labels = week_labels(month)
+    split, src = [], []
+    for r in df.itertuples():
+        w = sh.loc[r.sku, use].to_numpy(float) if r.sku in sh.index else np.ones(len(use))
+        split.append(_split_int(r.plan_qty, w))
+        src.append(sh.loc[r.sku, "week_source"] if r.sku in sh.index else "เท่ากัน")
+    wk = pd.DataFrame(split, columns=labels, index=df.index)
+    return pd.concat([df, wk], axis=1).assign(week_source=src)

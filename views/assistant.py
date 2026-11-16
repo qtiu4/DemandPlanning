@@ -41,7 +41,7 @@ def _err_text(e: Exception) -> str:
     return f"เกิดข้อผิดพลาด: {s[:300]}"
 
 
-ASSISTANT_VERSION = "1.5"
+ASSISTANT_VERSION = "1.6"
 FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.5-flash", "gemini-3.7-flash-lite", "gemini-3.5-flash-lite",
                    "gemini-3-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
@@ -257,7 +257,7 @@ with tab_plan:
     months = sorted(set([dp.default_plan_month(model)] + [mk for mk in model.fc_months if mk > model.last_month]))
     c1, c2 = st.columns([2, 3])
     mo = c1.selectbox("เดือนที่วางแผน", months, format_func=dp.month_label)
-    only_fc = c2.radio("SKU ที่รวมในแผน", ["เฉพาะที่มี Forecast", "ทุก SKU ตามตัวกรอง (ไม่มี FC ใช้ค่าเฉลี่ย)"],
+    only_fc = c2.radio("SKU ที่รวมในแผน (เฉพาะ Production = Y)", ["เฉพาะที่มี Forecast", "ทุก SKU ตามตัวกรอง (ไม่มี FC ใช้ค่าเฉลี่ย)"],
                        horizontal=True)
     sku_list = None if only_fc.startswith("เฉพาะ") else sorted(skus)
 

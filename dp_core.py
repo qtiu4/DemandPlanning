@@ -556,8 +556,8 @@ def default_plan_month(model: Model) -> int:
 
 def production_plan(model: Model, month: int | None = None, skus: list[str] | None = None,
                     on_hand: dict | None = None, on_order: dict | None = None,
-                    weekly: bool = True) -> pd.DataFrame:
-    """แผนผลิตรายเดือน (+ แบ่งรายสัปดาห์ตามสัดส่วนการขายในอดีต) — หน่วย: จำนวน
+                    weekly: bool = True, production_only: bool = True) -> pd.DataFrame:
+    """แผนผลิตรายเดือน (เฉพาะ SKU ที่ชีต Info คอลัมน์ Production = Y เมื่อ production_only=True) (+ แบ่งรายสัปดาห์ตามสัดส่วนการขายในอดีต) — หน่วย: จำนวน
 
     ความต้องการ = Forecast ของเดือนนั้น (ถ้าไม่มี ใช้ค่าเฉลี่ยในอดีต)
     ถ้าให้สต๊อกคงเหลือมา: แผนผลิต = ความต้องการ + Safety stock − คงเหลือ − ค้างรับ (ไม่ต่ำกว่า 0)
@@ -569,6 +569,9 @@ def production_plan(model: Model, month: int | None = None, skus: list[str] | No
     fc = model.fc[model.fc["month"] == month].set_index("sku")["forecast_qty"]
     if skus is None:
         skus = fc.index.tolist()
+    if production_only and "Production" in m.columns:
+        prod = m["Production"].astype(str).str.strip().str.upper().eq("Y")
+        skus = [k for k in skus if k in m.index and prod.get(k, False)]
     rows = []
     for sku in skus:
         if sku not in m.index:

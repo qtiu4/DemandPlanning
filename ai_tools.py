@@ -127,7 +127,7 @@ def make_tools(model: dp.Model, sink: list, stock: dict | None = None):
 
     def production_plan(month: str = "", skus: str = "", abc_xyz: str = "", tier: str = "",
                         category: str = "", stock_text: str = "", weekly: bool = True, top_n: int = 25) -> dict:
-        """แผนผลิตของเดือนที่ระบุ (หน่วย: จำนวน) พร้อมแบ่งรายสัปดาห์ตามสัดส่วนยอดขายในอดีต
+        """แผนผลิตของเดือนที่ระบุ (หน่วย: จำนวน) เฉพาะ SKU ที่ผลิตเอง (Production = Y ในชีต Info) พร้อมแบ่งรายสัปดาห์ตามสัดส่วนยอดขายในอดีต
         month: เช่น '2026-12' หรือ 'ธ.ค.' (เว้นว่าง = เดือนถัดไป)
         skus: รหัสคั่นด้วยจุลภาค (เว้นว่าง = ทุก SKU ที่มี forecast เดือนนั้น)
         abc_xyz: กรองกลุ่ม เช่น 'AX,AY' · tier: เช่น 'A1-Core' · category: หมวด เช่น '1,3'
@@ -142,7 +142,7 @@ def make_tools(model: dp.Model, sink: list, stock: dict | None = None):
             oh[k.strip()] = float(v.replace(",", ""))
         df = dp.production_plan(model, mo, sku_list, on_hand=oh, on_order=oo, weekly=weekly)
         if df.empty:
-            return {"month": dp.month_label(mo), "error": "ไม่มี SKU ที่ตรงเงื่อนไข หรือยังไม่มี forecast เดือนนี้"}
+            return {"month": dp.month_label(mo), "error": "ไม่มี SKU ที่ตรงเงื่อนไข (ต้องเป็นสินค้าที่ผลิตเอง Production = Y) หรือยังไม่มี forecast เดือนนี้"}
         if abc_xyz:
             df = df[df["ABC_XYZ"].isin([x.upper() for x in _split(abc_xyz)])]
         if tier:
@@ -185,7 +185,8 @@ def system_prompt(model: dp.Model) -> str:
    ถ้าให้รหัสครบแล้ว เรียกเครื่องมือหลัก (pr_suggestion / production_plan / stockout_watch) ได้ทันที ไม่ต้องเรียก find_sku หรือ sku_info ก่อน — เรียกเครื่องมือให้น้อยครั้งที่สุด
 4. การคำนวณ PR ต้องรู้สต๊อกคงเหลือ: ถ้าผู้ใช้ไม่บอก ให้เรียก pr_suggestion ด้วย on_hand=-1 ก่อน (ระบบจะใช้ตารางสต๊อกที่ผู้ใช้กรอกไว้) ถ้าได้ need_on_hand ค่อยถามผู้ใช้
 4.1 แผนผลิต: SKU ที่มีสต๊อกจะหักสต๊อกให้ (ความต้องการ + SS − คงเหลือ − ค้างรับ) ที่ไม่มีสต๊อกคือยอดตามความต้องการ ยังไม่หักสต๊อก — บอกผู้ใช้ทุกครั้งว่าหักสต๊อกไปกี่ SKU
-5. แผนผลิตรายสัปดาห์แบ่งตามสัดส่วนยอดขายในอดีตของแต่ละสัปดาห์ในเดือน (W1 = วันที่ 1–7 ... W5 = 29–สิ้นเดือน) บอกผู้ใช้ด้วย
+5. แผนผลิตมีเฉพาะสินค้าที่ผลิตเอง (Production = Y) สินค้าซื้อมาขายไม่อยู่ในแผน ถ้าผู้ใช้ถามถึงสินค้าที่ไม่อยู่ในแผน ให้บอกเหตุผลนี้ (ใช้ pr_suggestion ได้ถ้าต้องการสั่งซื้อ)
+5.1 แผนผลิตรายสัปดาห์แบ่งตามสัดส่วนยอดขายในอดีตของแต่ละสัปดาห์ในเดือน (W1 = วันที่ 1–7 ... W5 = 29–สิ้นเดือน) บอกผู้ใช้ด้วย
 6. บอกเสมอว่าความต้องการมาจาก Forecast หรือค่าเฉลี่ยในอดีต
 7. สรุปตัวเลขสำคัญในคำตอบ ตารางเต็มระบบจะแสดงใต้คำตอบเอง ไม่ต้องพิมพ์ตารางยาวซ้ำ (แสดงไม่เกิน 10 แถว)
 8. ตอบเฉพาะเรื่องการวางแผนผลิต/สต๊อก/ยอดขายของบริษัท
@@ -255,7 +256,7 @@ def quick_answer(text: str, model: dp.Model, sink: list, stock: dict | None = No
         ded = r.get("n_sku_stock_deducted", 0)
         top = "\n".join(f"| {i['sku']} | {i.get('ABC_XYZ') or ''} | {_f(i['plan_qty'])} |" for i in r["items"][:10])
         return (f"**แผนผลิต {r['month']}**{' กลุ่ม ' + ', '.join(groups) if groups else ''} — "
-                f"{r['n_sku']:,} SKU รวม **{_f(r['total_plan_qty'])} หน่วย**\n\n"
+                f"{r['n_sku']:,} SKU (เฉพาะสินค้าผลิตเอง Production = Y) รวม **{_f(r['total_plan_qty'])} หน่วย**\n\n"
                 f"| สัปดาห์ | จำนวน |\n|---|---:|\n{wk}\n\n"
                 f"แบ่งรายสัปดาห์ตามสัดส่วนยอดขาย 12 เดือนล่าสุดของแต่ละ SKU (ประวัติน้อย → ใช้ของหมวด) · "
                 + (f"หักสต๊อกคงเหลือแล้ว {ded:,} SKU ที่เหลือยังไม่หัก" if ded else

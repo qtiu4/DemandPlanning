@@ -73,14 +73,35 @@ def sheet_id_from_url(url: str) -> str:
 
 
 # ---------------------------------------------------------------- loaders
-def load_gsheet(url_or_id: str, timeout: int = 120) -> dict[str, pd.DataFrame]:
-    """ดาวน์โหลดทั้งไฟล์เป็น .xlsx (ต้องแชร์แบบ 'ทุกคนที่มีลิงก์ดูได้')"""
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def load_gsheet(url_or_id: str, timeout: int = 120, service_account: dict | None = None) -> dict[str, pd.DataFrame]:
+    """ดาวน์โหลดทั้งไฟล์เป็น .xlsx
+    • มี service_account (แนะนำ): ชีตเป็นส่วนตัวได้ แค่แชร์ให้อีเมลของ service account (ผู้มีสิทธิ์อ่าน)
+    • ไม่มี: ชีตต้องแชร์แบบ 'ทุกคนที่มีลิงก์ดูได้'"""
     sid = sheet_id_from_url(url_or_id)
-    url = f"https://docs.google.com/spreadsheets/d/{sid}/export?format=xlsx"
-    with urllib.request.urlopen(url, timeout=timeout) as r:
-        data = r.read()
+    if service_account:
+        from google.auth.transport.requests import AuthorizedSession
+        from google.oauth2 import service_account as sa
+        creds = sa.Credentials.from_service_account_info(
+            dict(service_account), scopes=["https://www.googleapis.com/auth/drive.readonly"])
+        sess = AuthorizedSession(creds)
+        r = sess.get(f"https://www.googleapis.com/drive/v3/files/{sid}/export",
+                     params={"mimeType": XLSX_MIME}, timeout=timeout)
+        if r.status_code == 403 and "exportSizeLimitExceeded" in r.text:      # ไฟล์ใหญ่เกิน 10MB
+            r = sess.get(f"https://docs.google.com/spreadsheets/d/{sid}/export?format=xlsx", timeout=timeout)
+        if r.status_code in (403, 404):
+            raise RuntimeError("Service account ยังไม่มีสิทธิ์อ่านชีตนี้ — กด Share ในชีตแล้วเพิ่มอีเมล "
+                               f"{service_account.get('client_email')} เป็นผู้มีสิทธิ์อ่าน (Viewer)")
+        r.raise_for_status()
+        data = r.content
+    else:
+        url = f"https://docs.google.com/spreadsheets/d/{sid}/export?format=xlsx"
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            data = r.read()
     if data[:2] != b"PK":
-        raise RuntimeError("ดาวน์โหลดไม่ได้ — ตรวจสอบว่าแชร์ชีตแบบ 'ทุกคนที่มีลิงก์สามารถดูได้'")
+        raise RuntimeError("ดาวน์โหลดไม่ได้ — ตรวจสอบสิทธิ์การแชร์ชีต")
     return load_xlsx(data)
 
 

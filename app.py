@@ -22,26 +22,23 @@ if _missing:
              "แล้วกด Manage app → ⋮ → **Reboot app**")
     st.stop()
 
-DEFAULT_SHEET = ("https://docs.google.com/spreadsheets/d/"
-                 "1guwwOA_WvXpu_pHxBM6CZAbtuEw61-x-8Vsxbxglkrg/edit?usp=sharing")
+def _secret(name, default=None):
+    try:
+        return st.secrets.get(name, default)
+    except Exception:  # ไม่มีไฟล์ secrets
+        return default
 
 
 @st.cache_data(ttl=600, show_spinner="กำลังดึงข้อมูล…")
 def load_model(source: str, key: str, blob: bytes | None = None):
     if source == "gsheet":
-        raw = dp.load_gsheet(key)
+        sa = _secret("gcp_service_account")
+        raw = dp.load_gsheet(_secret("sheet_url", ""), service_account=dict(sa) if sa else None)
     elif source == "xlsx":
         raw = dp.load_xlsx(blob)
     else:
         raw = dp.load_csv_dir(key)
     return dp.build_model(raw), dt.datetime.now()
-
-
-def secret_url() -> str:
-    try:
-        return st.secrets.get("sheet_url", DEFAULT_SHEET)
-    except Exception:  # ไม่มีไฟล์ secrets
-        return DEFAULT_SHEET
 
 
 # ------------------------------------------------------------ หน้า
@@ -68,28 +65,19 @@ with st.sidebar:
     st.divider()
 
 # ------------------------------------------------------------ โหลดข้อมูล
+# ลิงก์ชีตอยู่ใน Secrets เท่านั้น (sheet_url) — ไม่แสดงบนหน้าเว็บและไม่อยู่ในโค้ด
+# ทดสอบในเครื่อง: ตั้ง DP_DATA_DIR=<โฟลเดอร์ CSV>
 model, loaded_at = None, None
-with st.sidebar:
-    with st.expander("⚙️ แหล่งข้อมูล", expanded=False):
-        src = st.radio("แหล่งข้อมูล", ["Google Sheet", "อัปโหลด Excel", "โฟลเดอร์ CSV"],
-                       index=2 if os.environ.get("DP_DATA_DIR") else 0, label_visibility="collapsed")
-        try:
-            if src == "Google Sheet":
-                url = st.text_input("ลิงก์ Google Sheet", value=secret_url(),
-                                    help="ต้องแชร์แบบ 'ทุกคนที่มีลิงก์สามารถดูได้'")
-                model, loaded_at = load_model("gsheet", url)
-            elif src == "อัปโหลด Excel":
-                up = st.file_uploader("ไฟล์ .xlsx (File > Download จาก Google Sheet)", type=["xlsx"])
-                if up is not None:
-                    model, loaded_at = load_model("xlsx", up.name, up.getvalue())
-            else:
-                folder = st.text_input("โฟลเดอร์ CSV", value=os.environ.get("DP_DATA_DIR", "data"))
-                model, loaded_at = load_model("csv", folder)
-        except Exception as e:  # noqa: BLE001
-            st.error(f"โหลดข้อมูลไม่สำเร็จ: {e}")
-
-if model is None:
-    st.info("เปิด ⚙️ แหล่งข้อมูล ที่แถบซ้ายเพื่อเลือกข้อมูล")
+try:
+    if os.environ.get("DP_DATA_DIR"):
+        model, loaded_at = load_model("csv", os.environ["DP_DATA_DIR"])
+    elif _secret("sheet_url"):
+        model, loaded_at = load_model("gsheet", "secret")
+    else:
+        st.error("ยังไม่ได้ตั้งค่าแหล่งข้อมูล — ใส่ `sheet_url` ใน Secrets ของแอป (Manage app → Settings → Secrets)")
+        st.stop()
+except Exception as e:  # noqa: BLE001
+    st.error(f"โหลดข้อมูลไม่สำเร็จ: {e}")
     st.stop()
 
 # ------------------------------------------------------------ ตัวกรอง (ใช้ทุกหน้า)

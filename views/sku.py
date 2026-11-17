@@ -48,7 +48,7 @@ with st.container(border=True):
                     line=dict(color=ui.TEAL, dash="dot"))
     if pd.notna(sku.get("mean_monthly_qty")):
         ui.avg_line(fig, sku["mean_monthly_qty"], "เฉลี่ย", ui.PURPLE, "{:,.1f}")
-    st.plotly_chart(ui.style(fig, 400), use_container_width=True)
+    st.plotly_chart(ui.style(fig, 400), use_container_width=True, theme=None)
 if not len(f):
     st.warning("SKU นี้ยังไม่มีในชีต Forecast")
 

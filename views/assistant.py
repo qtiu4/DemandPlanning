@@ -11,6 +11,13 @@ import ai_tools
 import dp_core as dp
 import ui
 
+_need = [f for f in ("production_plan", "min_batch_map", "rolling_weeks", "consolidate_weeks") if not hasattr(dp, f)]
+_need += [f for f in ("quick_answer", "make_tools") if not hasattr(ai_tools, f)]
+if _need:
+    st.error("ไฟล์ **dp_core.py** หรือ **ai_tools.py** บน GitHub ยังเป็นเวอร์ชันเก่า (ขาด: " + ", ".join(_need) + ") — "
+             "อัปไฟล์ล่าสุดไว้ในโฟลเดอร์หลัก (ที่เดียวกับ app.py) แล้วกด Manage app → ⋮ → Reboot app")
+    st.stop()
+
 model, flt, skus = ui.ctx()
 ui.header("ผู้ช่วยวางแผน", "ถามเรื่องเปิด PR · แผนผลิตรายเดือน/รายสัปดาห์ · SKU เสี่ยงของขาด — "
                            "ตัวเลขคำนวณจากข้อมูลในชีต · AI: Google Gemini")
@@ -349,7 +356,7 @@ with tab_plan:
             fig = go.Figure(go.Bar(x=wt.index, y=wt.values, marker_color=ui.SERIES[:len(wt)],
                                    text=[f"{v:,.0f}" for v in wt.values], textposition="outside"))
             fig.update_yaxes(tickformat=",.0f")
-            st.plotly_chart(ui.style(fig, 320, legend=False), use_container_width=True)
+            st.plotly_chart(ui.style(fig, 320, legend=False), use_container_width=True, theme=None)
             n_ded = int(rolled.sum())
             st.caption("ยอดขายรายสัปดาห์กระจายตามสัดส่วนยอดขาย 12 เดือนล่าสุด (ประวัติน้อย → ใช้ของหมวด) · "
                        f"**SKU ที่กรอกสต๊อก ({n_ded:,})**: Rolling plan — ยอดขาย/วัน = ความต้องการ ÷ วันในเดือน, "

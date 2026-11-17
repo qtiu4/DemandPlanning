@@ -5,7 +5,7 @@ import ui
 ui.header("Non-moving Inventory", "สินค้าคงคลังที่ไม่เคลื่อนไหว · รอข้อมูลสต๊อก")
 
 with st.container(border=True):
-    ui.card_title("📦 รอออกแบบการแสดงผล")
+    ui.card_title("📦 หน้านี้จะเปิดใช้เมื่อเพิ่มข้อมูลสต๊อกคงเหลือ")
     st.markdown("""
 เมื่อมีชีตสต๊อกใน Google Sheet แล้ว หน้านี้จะแสดง
 
@@ -13,4 +13,5 @@ with st.container(border=True):
 - อายุ lot (Aging) และสัดส่วนสต๊อกจมแยกตาม ABC / หมวด
 - จำนวนเดือนที่สต๊อกพอขาย และสต๊อกที่เกิน Target
 
+แจ้งได้เลยเมื่อพร้อม แล้วจะเชื่อมกับชีตที่ใช้จริง
 """)

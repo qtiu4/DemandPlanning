@@ -73,7 +73,7 @@ with tab1:
                         line=dict(color=ui.ORANGE, width=3, dash="dot"))
         ui.avg_line(fig, tr["actual"].mean(), "เฉลี่ย 12 ด.", ui.TEAL)
         fig.update_yaxes(tickformat=",.0f")
-        st.plotly_chart(ui.style(fig, 380), use_container_width=True)
+        st.plotly_chart(ui.style(fig, 380), use_container_width=True, theme=None)
         st.caption("ยอดจริงนับเฉพาะ SKU ที่อยู่ในชีต Forecast")
     with c2, st.container(border=True):
         ui.card_title("Accuracy แยกหมวด")
@@ -86,7 +86,7 @@ with tab1:
                                              "Bias %{customdata[1]:+.0%}<extra></extra>"))
         ui.avg_line(fig, s["accuracy"], "รวม", ui.ORANGE, "{:.0%}")
         fig.update_yaxes(tickformat=".0%", range=[0, 1.1])
-        st.plotly_chart(ui.style(fig, 380, legend=False), use_container_width=True)
+        st.plotly_chart(ui.style(fig, 380, legend=False), use_container_width=True, theme=None)
 
     if len(months) > 1:
         with st.container(border=True):
@@ -100,7 +100,7 @@ with tab1:
                             line=dict(color=ui.ORANGE, width=2))
             ui.avg_line(fig, bm["accuracy"].mean(), "เฉลี่ย", ui.ORANGE, "{:.1%}")
             fig.update_yaxes(tickformat=".0%")
-            st.plotly_chart(ui.style(fig, 320), use_container_width=True)
+            st.plotly_chart(ui.style(fig, 320), use_container_width=True, theme=None)
 
 # ============================================================ เฝ้าระวังของขาด
 with tab5:
@@ -165,7 +165,7 @@ with tab2:
                                text=[ui.fmt_pct(v, 0, True) for v in b2["bias"]], textposition="outside"))
         fig.update_xaxes(tickformat=".0%", zeroline=True, zerolinecolor="#8B93C1")
         fig.update_yaxes(autorange="reversed", type="category")
-        st.plotly_chart(ui.style(fig, max(260, 32 * len(b2) + 60), legend=False), use_container_width=True)
+        st.plotly_chart(ui.style(fig, max(260, 32 * len(b2) + 60), legend=False), use_container_width=True, theme=None)
 
 # ============================================================ ราย SKU
 with tab3:
@@ -184,7 +184,7 @@ with tab3:
             hi = max(p["actual"].max(), p["forecast"].max())
             fig.add_scatter(x=[lo, hi], y=[lo, hi], mode="lines", line=dict(dash="dash", color="#8B93C1"),
                             showlegend=False, hoverinfo="skip")
-        st.plotly_chart(ui.style(fig, 440), use_container_width=True)
+        st.plotly_chart(ui.style(fig, 440), use_container_width=True, theme=None)
         st.caption("เหนือเส้นประ = พยากรณ์เกิน · ใต้เส้นประ = พยากรณ์ขาด"
                    + (" · แกน log ไม่แสดงจุดที่เป็น 0" if log else ""))
 

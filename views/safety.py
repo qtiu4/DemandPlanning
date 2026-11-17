@@ -95,7 +95,7 @@ with tab1:
                                text=[f"{v:,.0f}<br>{n} SKU" for v, n in zip(t["SS"], t["SKU"])],
                                textposition="outside"))
         fig.update_yaxes(tickformat=",.0f")
-        st.plotly_chart(ui.style(fig, 360, legend=False), use_container_width=True)
+        st.plotly_chart(ui.style(fig, 360, legend=False), use_container_width=True, theme=None)
     with c2, st.container(border=True):
         ui.card_title("SS คิดเป็นกี่เดือนของยอดขายเฉลี่ย")
         h = m["ss_months"].replace(np.inf, np.nan).dropna().clip(upper=6)
@@ -104,7 +104,7 @@ with tab1:
                       annotation_font_color=ui.ORANGE)
         fig.update_xaxes(title="Safety stock ÷ เฉลี่ย/เดือน (ตัดที่ 6)")
         fig.update_yaxes(title="จำนวน SKU")
-        st.plotly_chart(ui.style(fig, 360, legend=False), use_container_width=True)
+        st.plotly_chart(ui.style(fig, 360, legend=False), use_container_width=True, theme=None)
 
     if fcols:
         with st.container(border=True):

@@ -53,7 +53,7 @@ with tab0:
         marker=dict(line=dict(color=ui.BG, width=1.5)), root_color=ui.CARD, tiling=dict(pad=3))
     with st.container(border=True):
         ui.card_title("หมวดสินค้า → กลุ่มรหัส → SKU  (คลิกกล่องเพื่อเจาะลึก · คลิกแถบด้านบนเพื่อย้อนกลับ)")
-        st.plotly_chart(ui.style(fig, 640, legend=False), use_container_width=True)
+        st.plotly_chart(ui.style(fig, 640, legend=False), use_container_width=True, theme=None)
         st.caption("ในกล่อง SKU: รหัส · ยอดขายเฉลี่ยต่อเดือน (หน่วย) · กลุ่ม ABC-XYZ — กลุ่มรหัส = 3 หลักแรกของรหัสสินค้า")
     sub = (t.groupby(["หมวด", "กลุ่ม"]).agg(SKU=("sku", "count"), มูลค่า=("total_value", "sum"),
                                          เฉลี่ย=("mean_monthly_qty", "sum"),
@@ -79,7 +79,7 @@ with tab1:
                                       hovertemplate="%{y}%{x}<br>%{text}<extra></extra>"))
             hm.update_yaxes(autorange="reversed", showgrid=False)
             hm.update_xaxes(showgrid=False, side="top")
-            st.plotly_chart(ui.style(hm, 360, legend=False), use_container_width=True)
+            st.plotly_chart(ui.style(hm, 360, legend=False), use_container_width=True, theme=None)
     with c2, st.container(border=True):
         ui.card_title("Pareto มูลค่าสะสม")
         p = g.sort_values("total_value", ascending=False).reset_index(drop=True)
@@ -97,7 +97,7 @@ with tab1:
                           annotation_position="bottom right")
         fig.update_yaxes(tickformat=".0%", range=[0, 1.02])
         fig.update_xaxes(title="อันดับ SKU ตามมูลค่า")
-        st.plotly_chart(ui.style(fig, 360), use_container_width=True)
+        st.plotly_chart(ui.style(fig, 360), use_container_width=True, theme=None)
 
 with tab2:
     with st.container(border=True):

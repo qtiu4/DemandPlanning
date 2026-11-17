@@ -1,6 +1,25 @@
+# ธีมเข้มเสมอ — กำหนดทั้งโหมดสว่างและโหมดมืดเป็นสีเดียวกัน
+# ผู้ใช้จะตั้งเครื่อง/เบราว์เซอร์เป็น Light, Dark หรือ System ก็เห็นหน้าตาเหมือนกัน
 [theme]
 base = "dark"
 primaryColor = "#F43F5E"
 backgroundColor = "#0E1437"
+secondaryBackgroundColor = "#151C4B"
+textColor = "#E6E9F5"
+
+[theme.light]
+primaryColor = "#F43F5E"
+backgroundColor = "#0E1437"
+secondaryBackgroundColor = "#151C4B"
+textColor = "#E6E9F5"
+
+[theme.dark]
+primaryColor = "#F43F5E"
+backgroundColor = "#0E1437"
+secondaryBackgroundColor = "#151C4B"
+textColor = "#E6E9F5"
+
+[theme.sidebar]
+backgroundColor = "#0A0F2C"
 secondaryBackgroundColor = "#151C4B"
 textColor = "#E6E9F5"

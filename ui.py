@@ -82,6 +82,52 @@ h1, h2, h3, h4 {{ color: {TEXT}; }}
 .dp-logo .sm {{ color:#E0F2FE; font-size:15px; margin-top:8px; text-shadow:0 0 6px #38BDF8; }}
 .dp-foot {{ color:{MUTED}; font-size:.9rem; line-height:1.5; }}
 [data-testid="stSidebarNav"] {{ display:none; }}
+
+/* ===== บังคับโทนเข้มเสมอ แม้ผู้ใช้ตั้งเครื่อง/เบราว์เซอร์เป็นโหมดสว่าง (Light / System) ===== */
+html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stMain"] {{
+  background:{BG} !important; color:{TEXT} !important; color-scheme: dark; }}
+[data-testid="stSidebar"], [data-testid="stSidebar"] > div {{ background:{BG_SIDE} !important; }}
+[data-testid="stHeader"] {{ background:transparent !important; }}
+[data-testid="stHeader"] *, [data-testid="stToolbar"] * {{ color:{MUTED} !important; }}
+[data-testid="stMarkdownContainer"], [data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] strong, [data-testid="stMarkdownContainer"] td, [data-testid="stMarkdownContainer"] th,
+[data-testid="stText"], .stApp label, [data-testid="stWidgetLabel"], [data-testid="stWidgetLabel"] p {{
+  color:{TEXT} !important; }}
+[data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] p, .stApp small {{ color:{MUTED} !important; }}
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{ color:{MUTED} !important; }}
+[data-testid="stPageLink-NavLink"] p, [data-testid="stPageLink-NavLink"] span:not([data-testid="stIconMaterial"]) {{
+  color:{TEXT} !important; }}
+[data-testid="stPageLink-NavLink"]:hover, [data-testid="stPageLink-NavLink"][aria-current="page"] {{
+  background:#1B2456 !important; }}
+/* แท็บ */
+[data-baseweb="tab"], [data-baseweb="tab"] p {{ color:{TEXT} !important; background:transparent !important; }}
+[data-baseweb="tab"][aria-selected="true"], [data-baseweb="tab"][aria-selected="true"] p {{ color:{RED} !important; }}
+/* ช่องกรอก / dropdown / multiselect */
+[data-baseweb="select"] > div, [data-baseweb="input"], [data-baseweb="input"] > div, [data-baseweb="base-input"],
+[data-baseweb="textarea"], .stApp input, .stApp textarea, [data-testid="stNumberInputContainer"] {{
+  background:{CARD} !important; color:{TEXT} !important; border-color:{BORDER} !important; }}
+[data-baseweb="select"] *, .stApp input::placeholder, .stApp textarea::placeholder {{ color:{TEXT} !important; }}
+[data-baseweb="select"] svg, [data-testid="stNumberInputContainer"] button {{ color:{MUTED} !important; fill:{MUTED} !important; }}
+[data-testid="stNumberInputContainer"] button {{ background:{CARD} !important; }}
+[data-baseweb="tag"] {{ background:{RED} !important; }}
+[data-baseweb="tag"] * {{ color:#fff !important; }}
+[data-baseweb="popover"] li, [data-baseweb="popover"] [role="option"], [data-baseweb="menu"] li {{
+  background:{CARD} !important; color:{TEXT} !important; }}
+[data-baseweb="popover"] li:hover, [data-baseweb="popover"] [aria-selected="true"] {{ background:#1F2A63 !important; }}
+/* ปุ่ม */
+.stButton > button, .stDownloadButton > button, [data-testid="stBaseButton-secondary"] {{
+  background:#1B2456 !important; color:{TEXT} !important; border:1px solid {BORDER} !important; }}
+.stButton > button:hover, .stDownloadButton > button:hover {{ border-color:{RED} !important; color:#fff !important; }}
+/* expander / แชท / อัปโหลดไฟล์ */
+[data-testid="stExpander"] details, [data-testid="stExpander"] summary {{ background:{CARD} !important;
+  color:{TEXT} !important; border-color:{BORDER} !important; }}
+[data-testid="stExpander"] summary * {{ color:{TEXT} !important; }}
+[data-testid="stChatInput"], [data-testid="stChatInput"] > div {{ background:{CARD} !important; border-color:{BORDER} !important; }}
+[data-testid="stChatMessage"] {{ background:transparent !important; }}
+[data-testid="stFileUploaderDropzone"] {{ background:{CARD} !important; color:{TEXT} !important; }}
+[data-testid="stFileUploaderDropzone"] * {{ color:{TEXT} !important; }}
+/* สวิตช์ toggle / radio */
+[data-testid="stCheckbox"] p, [data-testid="stRadio"] p, [role="radiogroup"] p {{ color:{TEXT} !important; }}
 </style>
 """
 

@@ -51,7 +51,7 @@ SKU ในกลุ่มที่เลือก จะถูกติดธง
 **ตั้งค่า:** สร้าง API key ฟรีที่ aistudio.google.com → ใส่ใน Secrets
 ```toml
 GEMINI_API_KEY = "..."
-GEMINI_MODEL = "gemini-flash-latest"   # ไม่ใส่ก็ได้ · โควตาเต็มบ่อย ลองรุ่น flash-lite
+GEMINI_MODEL = "gemini-3.7-flash"   # ไม่ใส่ก็ได้ · โควตาเต็มบ่อย ลองรุ่น flash-lite
 ```
 
 **AI ไม่คิดเลขเอง** — เรียกฟังก์ชันใน `ai_tools.py` ที่ใช้สูตรเดียวกับหน้าอื่น แล้วอธิบายผล ตารางเต็มแสดงใต้คำตอบ (ดาวน์โหลดได้)
